@@ -16,7 +16,7 @@ username = st.secrets["sharepoint"]["USERNAME"]
 password = st.secrets["sharepoint"]["PASSWORD"]
 site_url = st.secrets["sharepoint"]["SITE_BASE"]
 file_name = st.secrets["sharepoint"]["ARQUIVO"]  # caminho server-relative do Excel com as abas
-solicitacoes = st.secrets["sharepoint"]["SOLICITAÇÕES"]
+#solicitacoes = st.secrets["sharepoint"]["SOLICITAÇÕES"]
 
 @st.cache_data
 def carregar_excel():
@@ -51,7 +51,7 @@ def carregar_excel():
         # SEMPRE retorne 4 DataFrames
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
-
+'''
 def carregar_solicitacoes():
     try:
         ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
@@ -69,7 +69,7 @@ def carregar_solicitacoes():
     except Exception as e:
         st.error(f"Erro ao acessar o arquivo no SharePoint: {e}")
         return pd.DataFrame()
-    
+'''
 
 
 def _sanitize_sheet_name(name: str) -> str:
