@@ -4,4 +4,4 @@ Pillow==10.3.0
 openpyxl==3.1.2
 pyzbar==0.1.9
 opencv-python==4.9.0.80
-office365-rest-python-client==2.5.18
+Office365_REST_Python_Client==2.5.14
