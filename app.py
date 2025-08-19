@@ -2,78 +2,34 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
-from dateutil.relativedelta import relativedelta
-import io
-import time
-import re
-from office365.sharepoint.client_context import ClientContext
-from office365.runtime.auth.user_credential import UserCredential
-from office365.sharepoint.files.file import File
+import io, time, re
+from sp_connector import SPConnector 
+from urllib.parse import quote
+
+# ===== Config via novo secrets =====
+TENANT_ID = st.secrets["graph"]["tenant_id"]
+CLIENT_ID = st.secrets["graph"]["client_id"]
+CLIENT_SECRET = st.secrets["graph"]["client_secret"]
+HOSTNAME = st.secrets["graph"]["hostname"]           
+SITE_PATH = st.secrets["graph"]["site_path"]          
+LIBRARY   = st.secrets["graph"]["library_name"]    
+USER_UPN  = st.secrets.get("onedrive", {}).get("user_upn", "")
+file_name = st.secrets["files"]["arquivo"]   
+
+GRAPH = "https://graph.microsoft.com/v1.0"
 
 
-# === Configurações do SharePoint (mesmo padrão do seu trecho que funciona) ===
-username = st.secrets["sharepoint"]["USERNAME"]
-password = st.secrets["sharepoint"]["PASSWORD"]
-site_url = st.secrets["sharepoint"]["SITE_BASE"]
-file_name = st.secrets["sharepoint"]["ARQUIVO"]  # caminho server-relative do Excel com as abas
-#solicitacoes = st.secrets["sharepoint"]["SOLICITAÇÕES"]
+# ====== Instancia o conector (um único lugar) =======
+@st.cache_resource
+def _sp():
+    return SPConnector(
+        TENANT_ID, CLIENT_ID, CLIENT_SECRET,
+        hostname=HOSTNAME, site_path=SITE_PATH, library_name=LIBRARY,
+        user_upn=USER_UPN,  # se preencher, entra em modo OneDrive
+    )
 
-@st.cache_data
-def carregar_excel():
-    try:
-        ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
-        response = File.open_binary(ctx, file_name)
-
-        # Lê todas as abas de uma vez
-        sheets = pd.read_excel(io.BytesIO(response.content), sheet_name=None)
-
-        # Usa .get() com defaults vazios se a aba não existir
-        df          = sheets.get("Arquivos",    pd.DataFrame())
-        df_espacos  = sheets.get("Espaços",     pd.DataFrame())
-        df_selects  = sheets.get("Selectboxes", pd.DataFrame())
-        Retencao_df = sheets.get("Retenção",    pd.DataFrame())
-
-        # Avisos úteis se alguma aba estiver faltando
-        faltando = [n for n, d in [
-            ("Arquivos", df),
-            ("Espaços", df_espacos),
-            ("Selectboxes", df_selects),
-            ("Retenção", Retencao_df),
-        ] if d.empty]
-
-        if faltando:
-            st.warning(f"A(s) aba(s) não encontrada(s) ou vazia(s): {', '.join(faltando)}")
-
-        return df, df_espacos, df_selects, Retencao_df
-
-    except Exception as e:
-        st.error(f"Erro ao acessar o arquivo no SharePoint: {e}")
-        # SEMPRE retorne 4 DataFrames
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    
-'''
-def carregar_solicitacoes():
-    try:
-        ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
-        response = File.open_binary(ctx, solicitacoes)
-
-        # Lê todas as abas de uma vez
-        sheets = pd.read_excel(io.BytesIO(response.content), sheet_name=None)
-
-        # Usa .get() com defaults vazios se a aba não existir
-        df_solicitacoes          = sheets.get("Arquivos",    pd.DataFrame())
-
-
-        return df_solicitacoes
-    
-    except Exception as e:
-        st.error(f"Erro ao acessar o arquivo no SharePoint: {e}")
-        return pd.DataFrame()
-'''
-
-
+# ===== (mantido) saneamento de nome de aba =====
 def _sanitize_sheet_name(name: str) -> str:
-    # Excel: máx 31 chars e proíbe []:*?/\ 
     return (
         name.replace("[", " ").replace("]", " ")
             .replace(":", " ").replace("*", " ")
@@ -82,57 +38,65 @@ def _sanitize_sheet_name(name: str) -> str:
     )[:31]
 
 
-def update_sharepoint_file(
-    df: pd.DataFrame,
-    file_path: str,               # ex.: "/sites/site/Shared Documents/arquivo.xlsx"
-    sheet_name: str = "Sheet1",
-    keep_existing: bool = False,
-    index: bool = False,
-):
-    """
-    Salva um DataFrame em uma aba do Excel no SharePoint.
-    Usa credenciais/URL de st.secrets['sharepoint'].
-    """
-    site_url = st.secrets["sharepoint"]["SITE_BASE"]
-    username = st.secrets["sharepoint"]["USERNAME"]
-    password = st.secrets["sharepoint"]["PASSWORD"]
+# ===== Carregar Excel (todas as abas que você usa) =====
+@st.cache_data
+def carregar_excel():
+    try:
+        content = _sp().download(file_name)
 
-    if "/" not in file_path:
-        st.error("file_path inválido (use server-relative, ex.: /sites/.../arquivo.xlsx)")
+        sheets = pd.read_excel(io.BytesIO(content), sheet_name=None)
+        df          = sheets.get("Arquivos",    pd.DataFrame())
+        df_espacos  = sheets.get("Espaços",     pd.DataFrame())
+        df_selects  = sheets.get("Selectboxes", pd.DataFrame())
+        Retencao_df = sheets.get("Retenção",    pd.DataFrame())
+
+        faltando = [n for n, d in [
+            ("Arquivos", df),
+            ("Espaços", df_espacos),
+            ("Selectboxes", df_selects),
+            ("Retenção", Retencao_df),
+        ] if d.empty]
+        if faltando:
+            st.warning(f"A(s) aba(s) não encontrada(s) ou vazia(s): {', '.join(faltando)}")
+
+        return df, df_espacos, df_selects, Retencao_df
+    except Exception as e:
+        st.error(f"Erro ao acessar o arquivo (Graph): {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
+def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "Sheet1",
+                           keep_existing: bool = False, index: bool = False):
+    if not isinstance(file_path, str) or not file_path:
+        st.error("file_path inválido")
         return
 
-    folder_path, file_name_only = file_path.rsplit("/", 1)
     safe_sheet = _sanitize_sheet_name(sheet_name)
+    attempts = 0
 
     while True:
         try:
-            # Lê abas existentes se precisar preservar
             existing_sheets = {}
             if keep_existing:
                 try:
-                    ctx_rd = ClientContext(site_url).with_credentials(UserCredential(username, password))
-                    resp = File.open_binary(ctx_rd, file_path)
-                    existing_sheets = pd.read_excel(io.BytesIO(resp.content), sheet_name=None) or {}
+                    # ANTES: content = _download_bytes(rel)
+                    content = _sp().download(file_path)
+                    existing_sheets = pd.read_excel(io.BytesIO(content), sheet_name=None) or {}
                 except Exception:
                     existing_sheets = {}
 
-            # Atualiza/insere a aba
             existing_sheets[safe_sheet] = df
 
-            # Escreve tudo num buffer
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                 for name, data in existing_sheets.items():
-                    (data if isinstance(data, pd.DataFrame) else pd.DataFrame(data))\
+                    (data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)) \
                         .to_excel(writer, sheet_name=_sanitize_sheet_name(name), index=index)
             output.seek(0)
 
-            # Upload pro SharePoint
-            ctx_wr = ClientContext(site_url).with_credentials(UserCredential(username, password))
-            target_folder = ctx_wr.web.get_folder_by_server_relative_url(folder_path)
-            target_folder.upload_file(file_name_only, output.read()).execute_query()
+            # ANTES: _upload_small(rel, output.read(), overwrite=True)
+            _sp().upload_small(file_path, output.read(), overwrite=True)
 
-            # Cache e feedback
             try:
                 st.cache_data.clear()
             except Exception:
@@ -141,18 +105,15 @@ def update_sharepoint_file(
             break
 
         except Exception as e:
-            locked = (
-                getattr(e, "response_status", None) == 423
-                or "-2147018894" in str(e)
-                or "lock" in str(e).lower()
-            )
-            if locked:
-                st.warning("Arquivo está em uso. Tentando novamente em 5 segundos...")
+            attempts += 1
+            msg = str(e)
+            if any(x in msg for x in ["409", "412", "429"]) and attempts < 5:
+                st.warning("Conflito/limite. Tentando novamente em 5s...")
                 time.sleep(5)
                 continue
-            else:
-                st.error(f"Erro ao salvar no SharePoint: {e}")
-                break
+            st.error(f"Erro ao salvar (Graph): {msg}")
+            break
+
 
 
 
