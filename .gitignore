@@ -1,3 +1,4 @@
 /.secrets
 app_copy.py
 documentos_arquivos.xlsx
+.streamlit/secrets.toml
