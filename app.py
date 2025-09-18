@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 import io, time, re
+import random
 from sp_connector import SPConnector 
 from urllib.parse import quote
 
@@ -115,6 +116,44 @@ def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "
             break
 
 
+# ===== Utilitários de Histórico =====
+def get_history_df() -> pd.DataFrame:
+    """Lê a planilha Historico do arquivo no SharePoint. Se não existir, retorna DF vazio com colunas padrão."""
+    try:
+        content = _sp().download(file_name)
+        sheets = pd.read_excel(io.BytesIO(content), sheet_name=None) or {}
+        hist = sheets.get("Historico", None)
+        if isinstance(hist, pd.DataFrame):
+            return hist
+    except Exception:
+        pass
+    return pd.DataFrame(columns=[
+        "Evento", "Data", "ID", "Tipo de Documento", "Origem Departamento Submissão",
+        "Codificação", "Solicitante", "Responsável", "Observação"
+    ])
+
+
+def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str,
+                codificacao_val: str, solicitante_val: str, responsavel_val: str,
+                data_val: datetime, observacao_val: str = ""):
+    """Acrescenta uma linha no histórico e salva na sheet Historico mantendo abas existentes."""
+    try:
+        hist_df = get_history_df()
+        nova_linha = {
+            "Evento": str(evento).upper(),
+            "Data": pd.to_datetime(data_val),
+            "ID": id_val,
+            "Tipo de Documento": tipo_doc_val,
+            "Origem Departamento Submissão": origem_sub_val,
+            "Codificação": codificacao_val,
+            "Solicitante": solicitante_val,
+            "Responsável": responsavel_val,
+            "Observação": observacao_val or ""
+        }
+        novo_hist = pd.concat([hist_df, pd.DataFrame([nova_linha])], ignore_index=True)
+        update_sharepoint_file(novo_hist, file_name, sheet_name="Historico", keep_existing=True)
+    except Exception as e:
+        st.warning(f"Não foi possível registrar histórico: {e}")
 
 
 # ===== Configuração da página =====
@@ -124,7 +163,7 @@ st.title("📂 Sistema de Arquivamento de Documentos")
 
 # TABs
 with st.sidebar:
-    aba = st.selectbox("Escolha o que deseja", ["Cadastrar", "Status","Consultar", "Movimentar", "⚙️ Opções"])
+    aba = st.selectbox("Escolha o que deseja", ["Cadastrar", "Status","Consultar", "Movimentar", "Histórico", "⚙️ Opções"])
 
     #Botao atualizar limpando cache
     if st.button("🔄 Atualizar"):
@@ -240,8 +279,24 @@ if aba == "Cadastrar":
         alnum = re.sub(r"[^A-Z0-9]", "", nome)
         return (alnum[:2] or "XX").ljust(2, "X")
 
+    def _duas_letras_aleatorias() -> str:
+        return "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(2))
+
+    def _prefixo_aleatorio_estavel(tipo_doc: str) -> str:
+        # Mantém duas letras aleatórias estáveis enquanto o usuário preenche o cadastro
+        rand_tipo = st.session_state.get("rand_tipo")
+        rand_pref = st.session_state.get("rand_prefix")
+        if rand_tipo == tipo_doc and isinstance(rand_pref, str) and len(rand_pref) == 2:
+            return rand_pref
+        novo = _duas_letras_aleatorias()
+        st.session_state["rand_tipo"] = tipo_doc
+        st.session_state["rand_prefix"] = novo
+        return novo
+
     def montar_prefixo(origem_depto: str, tipo_doc: str) -> str:
-        return f"{abrev_depto(origem_depto)}{abrev_tipo(tipo_doc)}"  # 4 letras
+        # Ignora o departamento de origem; usa sigla do tipo primeiro + 2 letras aleatórias
+        letras = _prefixo_aleatorio_estavel(tipo_doc)
+        return f"{abrev_tipo(tipo_doc)}{letras}"  # 4 letras
 
     # -----------------------------
     # Conversões NNL <-> índice (00A..99Z)
@@ -401,9 +456,9 @@ if aba == "Cadastrar":
     if origem_depto:
         filtro = Retencao_df[Retencao_df["ORIGEM DOCUMENTO SUBMISSÃO"] == origem_depto]
         if not filtro.empty:
-            retencao_selecionada = str(filtro["Retenção"].iloc[0]).strip()
+            retencao_selecionada = str(filtro["Retenção"].iloc(0) if hasattr(filtro["Retenção"], 'iloc') else filtro["Retenção"]).split()[0]
             try:
-                anos_reten = int(retencao_selecionada.split()[0])
+                anos_reten = int(str(retencao_selecionada).split()[0])
                 data_prevista_descarte = datetime.now() + relativedelta(years=anos_reten)
             except Exception:
                 pass
@@ -541,7 +596,32 @@ if aba == "Cadastrar":
             # Salva no SharePoint na aba "Arquivos", mantendo as outras abas
             update_sharepoint_file(df_final, file_name, sheet_name="Arquivos", keep_existing=True)
 
-
+            # registra histórico de SOLICITAÇÃO e ARQUIVAMENTO
+            log_history(
+                evento="SOLICITACAO_ARQUIVAMENTO",
+                id_val=unique_id,
+                tipo_doc_val=tipo_doc,
+                origem_sub_val=origem_submissao,
+                codificacao_val=codificacao,
+                solicitante_val=solicitante,
+                responsavel_val=responsavel,
+                data_val=datetime.now(),
+                observacao_val=""
+            )
+            log_history(
+                evento="ARQUIVAMENTO",
+                id_val=unique_id,
+                tipo_doc_val=tipo_doc,
+                origem_sub_val=origem_submissao,
+                codificacao_val=codificacao,
+                solicitante_val=solicitante,
+                responsavel_val=responsavel,
+                data_val=datetime.now(),
+                observacao_val=""
+            )
+            # limpa prefixo aleatório para o próximo cadastro
+            st.session_state["rand_prefix"] = None
+            st.session_state["rand_tipo"] = None
 
             st.session_state.ja_salvou = True
             st.cache_data.clear()
@@ -724,6 +804,19 @@ elif aba == "Status":
                                 df.at[idx, "Observação Desarquivamento"] = observacao_operacao.strip()
                                 st.success(f"✅ Documento {id_input} desarquivado com sucesso!")
 
+                                # log histórico DESARQUIVAMENTO
+                                log_history(
+                                    evento="DESARQUIVAMENTO",
+                                    id_val=id_input,
+                                    tipo_doc_val=str(df.at[idx, "Tipo de Documento"]) if "Tipo de Documento" in df.columns else "",
+                                    origem_sub_val=str(df.at[idx, "Origem Departamento Submissão"]) if "Origem Departamento Submissão" in df.columns else "",
+                                    codificacao_val=str(df.at[idx, "Codificação"]) if "Codificação" in df.columns else "",
+                                    solicitante_val=str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else "",
+                                    responsavel_val=responsavel_operacao,
+                                    data_val=pd.to_datetime(data_operacao),
+                                    observacao_val=observacao_operacao
+                                )
+
                             elif operacao_rearquivar:
                                 # Rearquivar: DESARQUIVADO → ARQUIVADO
                                 df.at[idx, "Status"] = "ARQUIVADO"
@@ -738,7 +831,18 @@ elif aba == "Status":
                                 if "Observação Desarquivamento" in df.columns:
                                     df.at[idx, "Observação Desarquivamento"] = ""
 
-                                
+                                # log histórico REARQUIVAMENTO
+                                log_history(
+                                    evento="REARQUIVAMENTO",
+                                    id_val=id_input,
+                                    tipo_doc_val=str(df.at[idx, "Tipo de Documento"]) if "Tipo de Documento" in df.columns else "",
+                                    origem_sub_val=str(df.at[idx, "Origem Departamento Submissão"]) if "Origem Departamento Submissão" in df.columns else "",
+                                    codificacao_val=str(df.at[idx, "Codificação"]) if "Codificação" in df.columns else "",
+                                    solicitante_val=str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else "",
+                                    responsavel_val=responsavel_operacao,
+                                    data_val=pd.to_datetime(data_operacao),
+                                    observacao_val=""
+                                )
 
                             # Salva no Excel
                             update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
@@ -980,3 +1084,57 @@ elif aba == "Desarquivar":
             st.dataframe(desarquivados[["Status","ID","Conteúdo da Caixa", "Tipo de Documento", "Local", "Estante", "Prateleira", "Caixa", "Responsável Arquivamento", "Data Arquivamento"]])
         else:
             st.info("Nenhum documento foi desarquivado ainda.")
+
+elif aba == "Histórico":
+    st.header("🕓 Histórico de Operações")
+
+    # Carrega histórico
+    hist = get_history_df()
+    if hist.empty:
+        st.info("Nenhum histórico registrado ainda.")
+    else:
+        # Normaliza datas
+        hist["Data"] = pd.to_datetime(hist["Data"], errors="coerce")
+
+        # Filtros
+        colf1, colf2, colf3 = st.columns(3)
+        with colf1:
+            f_id = st.text_input("ID")
+        with colf2:
+            f_evento = st.selectbox("Evento", [""] + sorted(hist["Evento"].dropna().unique().tolist()))
+        with colf3:
+            st.write("")
+
+        colf4, colf5, colf6 = st.columns(3)
+        with colf4:
+            f_tipo = st.selectbox("Tipo de Documento", [""] + sorted(hist["Tipo de Documento"].dropna().unique().tolist()))
+        with colf5:
+            f_origem = st.selectbox("Origem Departamento Submissão", [""] + sorted(hist["Origem Departamento Submissão"].dropna().unique().tolist()))
+        with colf6:
+            f_cod = st.selectbox("Codificação", [""] + sorted(hist["Codificação"].dropna().unique().tolist()))
+
+        colf7, _ = st.columns(2)
+        with colf7:
+            f_resp = st.selectbox("Responsável", [""] + sorted(hist["Responsável"].dropna().unique().tolist()))
+
+        # Aplica filtros
+        filtrado = hist.copy()
+        if f_evento:
+            filtrado = filtrado[filtrado["Evento"] == f_evento]
+        if f_tipo:
+            filtrado = filtrado[filtrado["Tipo de Documento"] == f_tipo]
+        if f_origem:
+            filtrado = filtrado[filtrado["Origem Departamento Submissão"] == f_origem]
+        if f_cod:
+            filtrado = filtrado[filtrado["Codificação"] == f_cod]
+        if f_resp:
+            filtrado = filtrado[filtrado["Responsável"] == f_resp]
+        if f_id:
+            filtro_id = f_id.strip().upper()
+            filtrado = filtrado[filtrado["ID"].astype(str).str.upper().str.contains(filtro_id, na=False)]
+
+        filtrado = filtrado.sort_values("Data", ascending=False)
+        # Formata data para exibição
+        show = filtrado.copy()
+        show["Data"] = pd.to_datetime(show["Data"]).dt.strftime("%d/%m/%Y %H:%M")
+        st.dataframe(show, use_container_width=True)
