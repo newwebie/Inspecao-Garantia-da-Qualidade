@@ -128,14 +128,17 @@ def get_history_df() -> pd.DataFrame:
     except Exception:
         pass
     return pd.DataFrame(columns=[
-        "Evento", "Data", "ID", "Tipo de Documento", "Origem Departamento Submissão",
-        "Codificação", "Solicitante", "Responsável", "Observação"
+        "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
+        "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+        "Solicitante", "Responsável", "Observação"
     ])
 
 
 def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str,
-                codificacao_val: str, solicitante_val: str, responsavel_val: str,
-                data_val: datetime, observacao_val: str = ""):
+                codificacao_val: str, tag_val: str, solicitante_val: str, responsavel_val: str,
+                data_val: datetime, observacao_val: str = "",
+                conteudo_val: str = "", local_val: str = "", prateleira_val: str = "",
+                estante_val: str = ""):
     """Acrescenta uma linha no histórico e salva na sheet Historico mantendo abas existentes."""
     try:
         hist_df = get_history_df()
@@ -144,8 +147,13 @@ def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str
             "Data": pd.to_datetime(data_val),
             "ID": id_val,
             "Tipo de Documento": tipo_doc_val,
-            "Origem Departamento Submissão": origem_sub_val,
+            "Origem Documento Submissão": origem_sub_val,
             "Codificação": codificacao_val,
+            "Tag": tag_val,
+            "Conteúdo da Caixa": conteudo_val,
+            "Local": local_val,
+            "Prateleira": prateleira_val,
+            "Estante": estante_val,
             "Solicitante": solicitante_val,
             "Responsável": responsavel_val,
             "Observação": observacao_val or ""
@@ -297,24 +305,33 @@ if aba == "Cadastrar":
         # Ignora o departamento de origem; usa sigla do tipo primeiro + 2 letras aleatórias
         letras = _prefixo_aleatorio_estavel(tipo_doc)
         return f"{abrev_tipo(tipo_doc)}{letras}"  # 4 letras
+    
+    # --------------------------------
+    # Capacidade do sufixo (AUMENTADA)
+    # --------------------------------
+    NUM_DIGITS = 3  # 3 -> 000..999  (se precisar mais, use 4 -> 0000..9999)
+    CAP_MAX = (10 ** NUM_DIGITS) * 26  # 26.000 IDs por prefixo
 
     # -----------------------------
-    # Conversões NNL <-> índice (00A..99Z)
+    # Conversões N..NL <-> índice (000A..999Z)
     # -----------------------------
     def idx_to_sufixo(idx: int) -> str:
         """
-        idx 0..2599 -> 'NNL' (00A..99Z)
+        idx 0..(CAP_MAX-1) -> 'NN..NL' (000A..999Z se NUM_DIGITS=3)
         num = idx // 26, letra = A + (idx % 26)
         """
-        if idx < 0 or idx >= 100 * 26:
-            raise ValueError("Capacidade esgotada para este prefixo (00A..99Z = 2600 IDs).")
+        if idx < 0 or idx >= CAP_MAX:
+            raise ValueError(
+                f"Capacidade esgotada para este prefixo "
+                f"(000A..{10**NUM_DIGITS - 1:0{NUM_DIGITS}d}Z = {CAP_MAX} IDs)."
+            )
         num = idx // 26
         letra_idx = idx % 26
         letra = chr(ord('A') + letra_idx)
-        return f"{num:02d}{letra}"
+        return f"{num:0{NUM_DIGITS}d}{letra}"
 
     def sufixo_to_idx(nnletra: str) -> int:
-        m = re.fullmatch(r"(\d{2})([A-Z])", nnletra)
+        m = re.fullmatch(rf"(\d{{{NUM_DIGITS}}})([A-Z])", nnletra)
         if not m:
             raise ValueError(f"Sufixo inválido: {nnletra}")
         num = int(m.group(1))
@@ -323,12 +340,13 @@ if aba == "Cadastrar":
 
     def extrair_prefixo_e_idx(id_str: str):
         """
-        De PPPPNNL (ex.: GQES03C) -> (prefixo='GQES', idx=int). Ignora formatos fora do padrão.
+        De PPPP + N..NL (ex.: ESA7 000A) -> (prefixo='ESA7', idx=int).
+        Ignora formatos fora do padrão.
         """
         if not isinstance(id_str, str):
             return None
         s = id_str.strip().upper()
-        m = re.fullmatch(r"([A-Z0-9]{4})(\d{2}[A-Z])", s)
+        m = re.fullmatch(rf"([A-Z0-9]{{4}})(\d{{{NUM_DIGITS}}}[A-Z])", s)
         if not m:
             return None
         prefixo = m.group(1)
@@ -338,6 +356,7 @@ if aba == "Cadastrar":
         except Exception:
             return None
         return prefixo, idx
+
 
     @st.cache_data(show_spinner=False)
     def ler_arquivos_existentes(path):
@@ -366,9 +385,10 @@ if aba == "Cadastrar":
         return ultimo
 
 
+
     def proximo_idx_para_prefixo(prefixo: str, df_mem: pd.DataFrame = None) -> int:
         """
-        Calcula o próximo índice (0..2599) para um prefixo, considerando:
+        Calcula o próximo índice (0..CAP_MAX-1) para um prefixo, considerando:
           1) cache de 'ultimo_idx_por_prefixo' (do DataFrame em memória)
           2) opcionalmente o df em memória adicional (para prévia)
         """
@@ -377,7 +397,7 @@ if aba == "Cadastrar":
 
         # também olha o df em memória (IDs desta sessão já carregados em df, antes de salvar)
         if df_mem is not None and not df_mem.empty and "ID" in df_mem.columns:
-            padrao = re.compile(rf"^{re.escape(prefixo)}(\d{{2}}[A-Z])$")
+            padrao = re.compile(rf"^{re.escape(prefixo)}(\d{{{NUM_DIGITS}}}[A-Z])$")
             for _id in df_mem["ID"].astype(str):
                 m = padrao.match(_id)
                 if m:
@@ -389,9 +409,13 @@ if aba == "Cadastrar":
                         pass
 
         proximo = base + 1
-        if proximo >= 100 * 26:
-            raise ValueError(f"Capacidade esgotada para o prefixo {prefixo} (00A..99Z).")
+        if proximo >= CAP_MAX:
+            raise ValueError(
+                f"Capacidade esgotada para o prefixo {prefixo} "
+                f"(000A..{10**NUM_DIGITS - 1:0{NUM_DIGITS}d}Z)."
+            )
         return proximo
+
 
 
 
@@ -406,7 +430,7 @@ if aba == "Cadastrar":
 
         # procura o maior índice já usado para esse prefixo no df em memória
         if df_mem is not None and not df_mem.empty and "ID" in df_mem.columns:
-            padrao = re.compile(rf"^{re.escape(prefixo)}(\d{{2}}[A-Z])$")
+            padrao = re.compile(rf"^{re.escape(prefixo)}(\d{{{NUM_DIGITS}}}[A-Z])$")
             for _id in df_mem["ID"].astype(str):
                 m = padrao.match(_id)
                 if m:
@@ -416,13 +440,17 @@ if aba == "Cadastrar":
                         pass
 
         proximo = base + 1
-        if proximo >= 100 * 26:
-            raise ValueError(f"Capacidade esgotada para o prefixo {prefixo} (00A..99Z).")
+        if proximo >= CAP_MAX:
+            raise ValueError(
+                f"Capacidade esgotada para o prefixo {prefixo} "
+                f"(000A..{10**NUM_DIGITS - 1:0{NUM_DIGITS}d}Z)."
+            )
 
         ultimo[prefixo] = proximo
         st.session_state["ultimo_idx_por_prefixo"] = ultimo
 
         return f"{prefixo}{idx_to_sufixo(proximo)}", df_mem
+
 
 
 
@@ -470,7 +498,7 @@ if aba == "Cadastrar":
         col3, col4 = st.columns(2)
         with col3:
             origem_submissao = st.selectbox(
-                "Origem Departamento Submissão*",
+                "Origem Documento Submissão*",
                 origens_submissao,
                 key="sb_origem_submissao"
             )
@@ -540,9 +568,12 @@ if aba == "Cadastrar":
             base = ultimo_idx_por_prefixo.get(prefixo_atual, -1)  # -1 significa que ainda não existe
 
             proximo_idx = base + 1
-            # 00A..99Z => 100*26 = 2600 possibilidades (índices 0..2599)
-            if proximo_idx >= 100 * 26:
-                raise ValueError(f"Capacidade esgotada para o prefixo {prefixo_atual} (00A..99Z).")
+            # 000A..999Z => (10**NUM_DIGITS)*26 possibilidades
+            if proximo_idx >= CAP_MAX:
+                raise ValueError(
+                    f"Capacidade esgotada para o prefixo {prefixo_atual} "
+                    f"(000A..{10**NUM_DIGITS - 1:0{NUM_DIGITS}d}Z)."
+                )
 
             id_atual = f"{prefixo_atual}{idx_to_sufixo(proximo_idx)}"
 
@@ -554,6 +585,7 @@ if aba == "Cadastrar":
 
         except Exception as e:
             st.error(f"Erro ao calcular o ID: {e}")
+
 
     # Fluxo: Cadastrar
     if cadastrar and not st.session_state.ja_salvou:
@@ -580,7 +612,7 @@ if aba == "Cadastrar":
                 "Tipo de Documento": tipo_doc,
                 "Conteúdo da Caixa": conteudo,
                 "Departamento Origem": origem_depto,
-                "Origem Departamento Submissão": origem_submissao,
+                "Origem Documento Submissão": origem_submissao,
                 "Responsável Arquivamento": responsavel,
                 "Data Arquivamento": datetime.now(),
                 "Período Utilizado Início": data_ini,
@@ -603,10 +635,15 @@ if aba == "Cadastrar":
                 tipo_doc_val=tipo_doc,
                 origem_sub_val=origem_submissao,
                 codificacao_val=codificacao,
+                tag_val=tag,
                 solicitante_val=solicitante,
                 responsavel_val=responsavel,
                 data_val=datetime.now(),
-                observacao_val=""
+                observacao_val="",
+                conteudo_val=conteudo,
+                local_val=local,
+                prateleira_val=prateleira,
+                estante_val=estante
             )
             log_history(
                 evento="ARQUIVAMENTO",
@@ -614,10 +651,15 @@ if aba == "Cadastrar":
                 tipo_doc_val=tipo_doc,
                 origem_sub_val=origem_submissao,
                 codificacao_val=codificacao,
+                tag_val=tag,
                 solicitante_val=solicitante,
                 responsavel_val=responsavel,
                 data_val=datetime.now(),
-                observacao_val=""
+                observacao_val="",
+                conteudo_val=conteudo,
+                local_val=local,
+                prateleira_val=prateleira,
+                estante_val=estante
             )
             # limpa prefixo aleatório para o próximo cadastro
             st.session_state["rand_prefix"] = None
@@ -669,6 +711,23 @@ elif aba == "Movimentar":
         # Feedback ao usuário
         if encontrados:
             st.success(f"{len(encontrados)} documento(s) localizado(s): {', '.join(encontrados)}")
+            # Exibe onde cada documento está atualmente
+            try:
+                show_cols = [
+                    "ID", "Local", "Estante", "Prateleira",
+                    "Data Arquivamento", "Responsável Arquivamento"
+                ]
+                atual_df = df[df["ID"].astype(str).str.upper().isin(encontrados)].copy()
+                if "Data Arquivamento" in atual_df.columns:
+                    try:
+                        atual_df["Data Arquivamento"] = pd.to_datetime(atual_df["Data Arquivamento"]).dt.strftime("%d/%m/%Y")
+                    except Exception:
+                        pass
+                colunas_existentes = [c for c in show_cols if c in atual_df.columns]
+                if colunas_existentes:
+                    st.dataframe(atual_df[colunas_existentes], use_container_width=True)
+            except Exception:
+                pass
         if faltando:
             st.warning(f"Não encontrado(s): {', '.join(faltando)}")
 
@@ -694,8 +753,6 @@ elif aba == "Movimentar":
 
                 update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
 
-
-                st.success(f"Movimentação concluída para {len(idxs)} documento(s).")
     else:
         nada = None
 
@@ -766,6 +823,11 @@ elif aba == "Status":
                     key="dt_operacao"
                 )
                 
+                solicitante_operacao = st.text_input(
+                    "Solicitante da Operação",
+                    key="tx_solic_operacao"
+                )
+                
                 # Campo específico para desarquivamento parcial
                 observacao_operacao = ""
                 if operacao_desarquivar:
@@ -802,19 +864,23 @@ elif aba == "Status":
                                     df["Observação Desarquivamento"] = ""
 
                                 df.at[idx, "Observação Desarquivamento"] = observacao_operacao.strip()
-                                st.success(f"✅ Documento {id_input} desarquivado com sucesso!")
 
                                 # log histórico DESARQUIVAMENTO
                                 log_history(
                                     evento="DESARQUIVAMENTO",
                                     id_val=id_input,
                                     tipo_doc_val=str(df.at[idx, "Tipo de Documento"]) if "Tipo de Documento" in df.columns else "",
-                                    origem_sub_val=str(df.at[idx, "Origem Departamento Submissão"]) if "Origem Departamento Submissão" in df.columns else "",
+                                    origem_sub_val=str(df.at[idx, "Origem Documento Submissão"]) if "Origem Documento Submissão" in df.columns else "",
                                     codificacao_val=str(df.at[idx, "Codificação"]) if "Codificação" in df.columns else "",
-                                    solicitante_val=str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else "",
+                                    tag_val=str(df.at[idx, "Tag"]) if "Tag" in df.columns else "",
+                                    solicitante_val=(solicitante_operacao or str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else ""),
                                     responsavel_val=responsavel_operacao,
                                     data_val=pd.to_datetime(data_operacao),
-                                    observacao_val=observacao_operacao
+                                    observacao_val=observacao_operacao,
+                                    conteudo_val=str(df.at[idx, "Conteúdo da Caixa"]) if "Conteúdo da Caixa" in df.columns else "",
+                                    local_val=str(df.at[idx, "Local"]) if "Local" in df.columns else "",
+                                    prateleira_val=str(df.at[idx, "Prateleira"]) if "Prateleira" in df.columns else "",
+                                    estante_val=str(df.at[idx, "Estante"]) if "Estante" in df.columns else ""
                                 )
 
                             elif operacao_rearquivar:
@@ -836,17 +902,21 @@ elif aba == "Status":
                                     evento="REARQUIVAMENTO",
                                     id_val=id_input,
                                     tipo_doc_val=str(df.at[idx, "Tipo de Documento"]) if "Tipo de Documento" in df.columns else "",
-                                    origem_sub_val=str(df.at[idx, "Origem Departamento Submissão"]) if "Origem Departamento Submissão" in df.columns else "",
+                                    origem_sub_val=str(df.at[idx, "Origem Documento Submissão"]) if "Origem Documento Submissão" in df.columns else "",
                                     codificacao_val=str(df.at[idx, "Codificação"]) if "Codificação" in df.columns else "",
-                                    solicitante_val=str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else "",
+                                    tag_val=str(df.at[idx, "Tag"]) if "Tag" in df.columns else "",
+                                    solicitante_val=(solicitante_operacao or str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else ""),
                                     responsavel_val=responsavel_operacao,
                                     data_val=pd.to_datetime(data_operacao),
-                                    observacao_val=""
+                                    observacao_val="",
+                                    conteudo_val=str(df.at[idx, "Conteúdo da Caixa"]) if "Conteúdo da Caixa" in df.columns else "",
+                                    local_val=str(df.at[idx, "Local"]) if "Local" in df.columns else "",
+                                    prateleira_val=str(df.at[idx, "Prateleira"]) if "Prateleira" in df.columns else "",
+                                    estante_val=str(df.at[idx, "Estante"]) if "Estante" in df.columns else ""
                                 )
 
                             # Salva no Excel
                             update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
-                            st.success(f"✅ Documento {id_input} rearquivado com sucesso!")
 
 
                             # Limpa cache e recarrega
@@ -875,9 +945,7 @@ elif aba == "Status":
     total_desarquivados = len(desarquivados)
     with st.expander(f"📄 Ver Documentos Desarquivados ({total_desarquivados})"):
         if not desarquivados.empty:
-            desarquivados["Data Desarquivamento"] = pd.to_datetime(
-                desarquivados["Data Desarquivamento"]
-            ).dt.strftime("%d/%m/%Y")
+            desarquivados["Data Desarquivamento"] = desarquivados["Data Desarquivamento"]
 
             # Inicializa a coluna se estiver faltando
             if "Observação Desarquivamento" not in desarquivados.columns:
@@ -890,12 +958,7 @@ elif aba == "Status":
                 "Observação Desarquivamento"
             ]])
 
-            # Destaque visual para desarquivamentos parciais (opcional)
-            parciais = desarquivados[desarquivados["Observação Desarquivamento"].str.strip() != ""]
-            if not parciais.empty:
-                st.markdown("**📌 Desarquivamentos Parciais Identificados:**")
-                for _, row in parciais.iterrows():
-                    st.markdown(f"- **ID {row['ID']}**: {row['Observação Desarquivamento']}")
+
 
         else:
             st.info("Nenhum documento foi desarquivado ainda.")
@@ -964,7 +1027,6 @@ elif aba == "⚙️ Opções":
     if salvar_reten and houve_alteracao_reten:
         update_sharepoint_file(df_editado, file_name, sheet_name="Retenção", keep_existing=True)
 
-        st.success("Retenção atualizada com sucesso.")
         st.rerun()
     
 
@@ -1000,7 +1062,6 @@ elif aba == "⚙️ Opções":
     if salvar_espacos and houve_alteracao_espacos:
         update_sharepoint_file(df_editado_espacos,file_name, sheet_name="Espaços", keep_existing=True)
 
-        st.success("Espaços atualizados com sucesso.")
         st.rerun()
 
 
@@ -1010,7 +1071,7 @@ elif aba == "⚙️ Opções":
 #   CONSULTAR
 # ===================================#
 elif aba == "Consultar":
-    st.header("🔎 Consulta de Documentos")
+    st.subheader("🔎 Consulta de Documentos")
 
     with st.expander("🔍 Buscar por Codificação"):
         opcoes_cod = sorted(df["Codificação"].dropna().unique())
@@ -1024,6 +1085,7 @@ elif aba == "Consultar":
                 st.dataframe(resultado[["ID","Status", "Conteúdo da Caixa", "Tipo de Documento","Departamento Origem", "Local", "Estante", "Prateleira", "Caixa", "Responsável Arquivamento", "Data Arquivamento"]])
             else:
                 st.warning("Nenhum documento encontrado com esta codificação.")
+    st.markdown("<br>", unsafe_allow_html=True)
 
     st.subheader("📅 Buscar por Período")
     col1, col2 = st.columns(2)
@@ -1042,8 +1104,46 @@ elif aba == "Consultar":
             st.info("Nenhum documento encontrado no período especificado.")
         else:
             filtrado["Data Arquivamento"] = pd.to_datetime(filtrado["Data Arquivamento"]).dt.strftime("%d/%m/%Y")
-            st.dataframe(filtrado[["Status", "Codificação", "Conteúdo da Caixa", "Tipo de Documento", "Local", "Estante", "Prateleira", "Caixa", "Responsável Arquivamento", "Data Arquivamento"]])
+            st.dataframe(filtrado[["Status", "ID", "Codificação", "Conteúdo da Caixa", "Tipo de Documento", "Local", "Estante", "Prateleira", "Caixa", "Responsável Arquivamento", "Data Arquivamento"]])
+        
+    st.markdown("<br>", unsafe_allow_html=True)
 
+    # ===== Consulta específica por ID =====
+    st.subheader("🎯 Consulta específica")
+    st.text("Veja toda informação referente ao documento")
+    id_consulta = st.text_input("Informe o ID do documento", key="tx_consulta_id").strip().upper()
+    if id_consulta:
+        registro = df[df["ID"].astype(str).str.upper() == id_consulta].copy()
+        if registro.empty:
+            st.warning("ID não encontrado.")
+        else:
+            # Considera apenas a primeira linha correspondente
+            linha = registro.iloc[0]
+            colunas_preenchidas = []
+            for col in linha.index.tolist():
+                val = linha[col]
+                if pd.isna(val):
+                    continue
+                # Trata strings vazias/espacos
+                if isinstance(val, str) and val.strip() == "":
+                    continue
+                colunas_preenchidas.append(col)
+
+            if not colunas_preenchidas:
+                st.info("Nenhuma coluna preenchida para este registro.")
+            else:
+                df_mostrar = pd.DataFrame([linha[colunas_preenchidas].to_dict()])
+                # Formata datas conhecidas, se existirem
+                for c in [
+                    "Data Arquivamento", "Data Desarquivamento", "Período Utilizado Início",
+                    "Período Utilizado Fim", "Data Prevista de Descarte"
+                ]:
+                    if c in df_mostrar.columns:
+                        try:
+                            df_mostrar[c] = pd.to_datetime(df_mostrar[c]).dt.strftime("%d/%m/%Y")
+                        except Exception:
+                            pass
+                st.dataframe(df_mostrar, use_container_width=True)
 
 
 elif aba == "Desarquivar":
@@ -1068,7 +1168,6 @@ elif aba == "Desarquivar":
                 update_sharepoint_file(df, file_name,sheet_name="Arquivos", keep_existing=True)
 
 
-                st.success("Documento desarquivado com sucesso!")
             elif responsavel_saida.strip() == "":
                 st.warning("Selecione o responsável pelo desarquivamento.")
 
@@ -1103,13 +1202,13 @@ elif aba == "Histórico":
         with colf2:
             f_evento = st.selectbox("Evento", [""] + sorted(hist["Evento"].dropna().unique().tolist()))
         with colf3:
-            st.write("")
+            f_tag = st.selectbox("Tag", [""] + sorted(hist["Tag"].dropna().unique().tolist())) if "Tag" in hist.columns else ""
 
         colf4, colf5, colf6 = st.columns(3)
         with colf4:
             f_tipo = st.selectbox("Tipo de Documento", [""] + sorted(hist["Tipo de Documento"].dropna().unique().tolist()))
         with colf5:
-            f_origem = st.selectbox("Origem Departamento Submissão", [""] + sorted(hist["Origem Departamento Submissão"].dropna().unique().tolist()))
+            f_origem = st.selectbox("Origem Documento Submissão", [""] + sorted(hist["Origem Documento Submissão"].dropna().unique().tolist()))
         with colf6:
             f_cod = st.selectbox("Codificação", [""] + sorted(hist["Codificação"].dropna().unique().tolist()))
 
@@ -1124,9 +1223,11 @@ elif aba == "Histórico":
         if f_tipo:
             filtrado = filtrado[filtrado["Tipo de Documento"] == f_tipo]
         if f_origem:
-            filtrado = filtrado[filtrado["Origem Departamento Submissão"] == f_origem]
+            filtrado = filtrado[filtrado["Origem Documento Submissão"] == f_origem]
         if f_cod:
             filtrado = filtrado[filtrado["Codificação"] == f_cod]
+        if f_tag:
+            filtrado = filtrado[filtrado["Tag"] == f_tag]
         if f_resp:
             filtrado = filtrado[filtrado["Responsável"] == f_resp]
         if f_id:
@@ -1137,4 +1238,14 @@ elif aba == "Histórico":
         # Formata data para exibição
         show = filtrado.copy()
         show["Data"] = pd.to_datetime(show["Data"]).dt.strftime("%d/%m/%Y %H:%M")
-        st.dataframe(show, use_container_width=True)
+        # Define ordem de colunas priorizando as solicitadas, exibindo apenas as que existirem
+        preferred_cols = [
+            "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
+            "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+            "Solicitante", "Responsável", "Observação"
+        ]
+        cols_to_show = [c for c in preferred_cols if c in show.columns]
+        if cols_to_show:
+            st.dataframe(show[cols_to_show], use_container_width=True)
+        else:
+            st.dataframe(show, use_container_width=True)
