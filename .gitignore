@@ -1,6 +1,5 @@
 /.secrets
 app_copy.py
-documentos_arquivo.xlsx
 .streamlit/secrets.toml
 __pycache__/
 *.py[cod]
@@ -12,3 +11,5 @@ venv/
 .env
 .streamlit/secrets.toml
 .vscode/
+documentos_arquivo - Copia.xlsx
+documentos_arquivo.xlsx

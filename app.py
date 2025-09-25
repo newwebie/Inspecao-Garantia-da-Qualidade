@@ -50,6 +50,7 @@ def carregar_excel():
         df_espacos  = sheets.get("Espaços",     pd.DataFrame())
         df_selects  = sheets.get("Selectboxes", pd.DataFrame())
         Retencao_df = sheets.get("Retenção",    pd.DataFrame())
+        df_hist     = sheets.get("Histórico",    pd.DataFrame())
 
         faltando = [n for n, d in [
             ("Arquivos", df),
@@ -60,10 +61,10 @@ def carregar_excel():
         if faltando:
             st.warning(f"A(s) aba(s) não encontrada(s) ou vazia(s): {', '.join(faltando)}")
 
-        return df, df_espacos, df_selects, Retencao_df
+        return df, df_espacos, df_selects, Retencao_df, df_hist
     except Exception as e:
         st.error(f"Erro ao acessar o arquivo (Graph): {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "Sheet1",
@@ -109,7 +110,7 @@ def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "
             attempts += 1
             msg = str(e)
             if any(x in msg for x in ["409", "412", "429"]) and attempts < 5:
-                st.warning("Conflito/limite. Tentando novamente em 5s...")
+                st.warning("Arquivo já em uso. Tentando novamente em 5s...")
                 time.sleep(5)
                 continue
             st.error(f"Erro ao salvar (Graph): {msg}")
@@ -171,7 +172,7 @@ st.title("📂 Sistema de Arquivamento de Documentos")
 
 # TABs
 with st.sidebar:
-    aba = st.selectbox("Escolha o que deseja", ["Cadastrar", "Status","Consultar", "Movimentar", "Histórico", "⚙️ Opções"])
+    aba = st.selectbox("Escolha o que deseja", ["Cadastrar", "Status","Consultar", "Editar", "Movimentar", "Histórico", "⚙️ Opções"])
 
     #Botao atualizar limpando cache
     if st.button("🔄 Atualizar"):
@@ -180,7 +181,7 @@ with st.sidebar:
         st.rerun()  
 
 
-    df, df_espacos, df_selects, Retencao_df = carregar_excel()
+    df, df_espacos, df_selects, Retencao_df, df_hist = carregar_excel()
     # Estruturas (Espaços)
     estruturas = {
         f"ARQUIVO {str(row['Arquivo']).strip().upper()}": {
@@ -703,6 +704,7 @@ elif aba == "Movimentar":
 
     # Filtra no DF
     if ids_list:
+        # DF com ID_UP para facilitar comparações em maiúsculas
         df_ids_upper = df.assign(ID_UP=df["ID"].astype(str).str.upper())
         encontrados_df = df_ids_upper[df_ids_upper["ID_UP"].isin(ids_list)].copy()
         encontrados = encontrados_df["ID_UP"].tolist()
@@ -711,28 +713,71 @@ elif aba == "Movimentar":
         # Feedback ao usuário
         if encontrados:
             st.success(f"{len(encontrados)} documento(s) localizado(s): {', '.join(encontrados)}")
-            # Exibe onde cada documento está atualmente
-            try:
-                show_cols = [
-                    "ID", "Local", "Estante", "Prateleira",
-                    "Data Arquivamento", "Responsável Arquivamento"
-                ]
-                atual_df = df[df["ID"].astype(str).str.upper().isin(encontrados)].copy()
-                if "Data Arquivamento" in atual_df.columns:
+
+            # --------- BLOQUEIO: Status = DESARQUIVADO ---------
+            # Separa bloqueados e movíveis
+            status_col = "Status" if "Status" in encontrados_df.columns else None
+            if status_col:
+                bloqueados_mask = encontrados_df[status_col].astype(str).str.upper().eq("DESARQUIVADO")
+            else:
+                bloqueados_mask = pd.Series([False] * len(encontrados_df), index=encontrados_df.index)
+
+            bloqueados_df = encontrados_df[bloqueados_mask].copy()
+            moveis_df    = encontrados_df[~bloqueados_mask].copy()
+
+            # Tabela para bloqueados (não podem ser movimentados)
+            if not bloqueados_df.empty:
+                st.error(f"{len(bloqueados_df)} documento(s) com status DESARQUIVADO não podem ser movimentados. Listados abaixo:")
+                # Formata Data Desarquivamento se existir
+                if "Data Desarquivamento" in bloqueados_df.columns:
                     try:
-                        atual_df["Data Arquivamento"] = pd.to_datetime(atual_df["Data Arquivamento"]).dt.strftime("%d/%m/%Y")
+                        bloqueados_df["Data Desarquivamento"] = pd.to_datetime(bloqueados_df["Data Desarquivamento"]).dt.strftime("%d/%m/%Y")
                     except Exception:
                         pass
-                colunas_existentes = [c for c in show_cols if c in atual_df.columns]
-                if colunas_existentes:
-                    st.dataframe(atual_df[colunas_existentes], use_container_width=True)
-            except Exception:
-                pass
+
+                # Colunas pedidas (ignorando as que não existem)
+                cols_desejadas = [
+                    "ID",
+                    "Tipo de Documento",
+                    "Conteúdo da Caixa",
+                    "Data Desarquivamento",
+                    "Responsável Desarquivamento",
+                ]
+                cols_existentes = [c for c in cols_desejadas if c in bloqueados_df.columns]
+                if cols_existentes:
+                    st.dataframe(bloqueados_df[cols_existentes], use_container_width=True)
+                else:
+                    st.caption("Nenhuma das colunas esperadas para exibição foi encontrada nos dados.")
+
+            # Mostra também a situação atual (local/estante/prateleira) dos elegíveis
+            if not moveis_df.empty:
+                try:
+                    show_cols = [
+                        "ID", "Local", "Estante", "Prateleira",
+                        "Data Arquivamento", "Responsável Arquivamento"
+                    ]
+                    atual_df = df[df["ID"].astype(str).str.upper().isin(moveis_df["ID_UP"])].copy()
+                    if "Data Arquivamento" in atual_df.columns:
+                        try:
+                            atual_df["Data Arquivamento"] = pd.to_datetime(atual_df["Data Arquivamento"]).dt.strftime("%d/%m/%Y")
+                        except Exception:
+                            pass
+                    colunas_existentes = [c for c in show_cols if c in atual_df.columns]
+                    if colunas_existentes:
+                        st.subheader("📍 Localização atual")
+                        st.dataframe(atual_df[colunas_existentes], use_container_width=True)
+                except Exception:
+                    pass
+
         if faltando:
             st.warning(f"Não encontrado(s): {', '.join(faltando)}")
 
-        if encontrados:
-            # Seleção da NOVA localização (aplicada a todos os IDs encontrados)
+        # ---------- UI para movimentar APENAS os elegíveis ----------
+        moveis_ids = moveis_df["ID_UP"].tolist() if encontrados else []
+
+        if moveis_ids:
+            st.info(f"{len(moveis_ids)} documento(s) elegível(eis) para movimentação.")
+            # Seleção da NOVA localização (aplicada a todos os IDs elegíveis)
             local = st.selectbox("Novo Local", list(estruturas.keys()))
             estantes_disp = [str(i + 1).zfill(3) for i in range(estruturas[local]["estantes"])]
             prateleiras_disp = [str(i + 1).zfill(3) for i in range(estruturas[local]["prateleiras"])]
@@ -743,21 +788,26 @@ elif aba == "Movimentar":
             with col2:
                 prateleira = st.selectbox("Nova Prateleira", prateleiras_disp)
 
-
-            # Confirmar movimentação para TODOS os encontrados
+            # Confirmar movimentação para TODOS os elegíveis
             if st.button("Confirmar Movimentação"):
-                idxs = df[df["ID"].astype(str).str.upper().isin(encontrados)].index
+                idxs = df[df["ID"].astype(str).str.upper().isin(moveis_ids)].index
                 df.loc[idxs, "Local"] = local
                 df.loc[idxs, "Estante"] = estante
                 df.loc[idxs, "Prateleira"] = prateleira
 
                 update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
 
+                # Feedback pós-movimentação
+                ids_movidos = df.loc[idxs, "ID"].astype(str).tolist()
+                st.success(f"Movimentação concluída para: {', '.join(ids_movidos)}")
+                if not bloqueados_df.empty:
+                    st.info(f"Os seguintes IDs foram ignorados por estarem DESARQUIVADOS: {', '.join(bloqueados_df['ID'].astype(str).tolist())}")
+        else:
+            if encontrados:  # havia IDs, mas nenhum elegível
+                st.info("Nenhum documento elegível para movimentação (todos DESARQUIVADOS).")
+
     else:
         nada = None
-
-
-
 
 #====================================#
 #   DESARQUIVAR
@@ -823,11 +873,6 @@ elif aba == "Status":
                     key="dt_operacao"
                 )
                 
-                solicitante_operacao = st.text_input(
-                    "Solicitante da Operação",
-                    key="tx_solic_operacao"
-                )
-                
                 # Campo específico para desarquivamento parcial
                 observacao_operacao = ""
                 if operacao_desarquivar:
@@ -864,24 +909,7 @@ elif aba == "Status":
                                     df["Observação Desarquivamento"] = ""
 
                                 df.at[idx, "Observação Desarquivamento"] = observacao_operacao.strip()
-
-                                # log histórico DESARQUIVAMENTO
-                                log_history(
-                                    evento="DESARQUIVAMENTO",
-                                    id_val=id_input,
-                                    tipo_doc_val=str(df.at[idx, "Tipo de Documento"]) if "Tipo de Documento" in df.columns else "",
-                                    origem_sub_val=str(df.at[idx, "Origem Documento Submissão"]) if "Origem Documento Submissão" in df.columns else "",
-                                    codificacao_val=str(df.at[idx, "Codificação"]) if "Codificação" in df.columns else "",
-                                    tag_val=str(df.at[idx, "Tag"]) if "Tag" in df.columns else "",
-                                    solicitante_val=(solicitante_operacao or str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else ""),
-                                    responsavel_val=responsavel_operacao,
-                                    data_val=pd.to_datetime(data_operacao),
-                                    observacao_val=observacao_operacao,
-                                    conteudo_val=str(df.at[idx, "Conteúdo da Caixa"]) if "Conteúdo da Caixa" in df.columns else "",
-                                    local_val=str(df.at[idx, "Local"]) if "Local" in df.columns else "",
-                                    prateleira_val=str(df.at[idx, "Prateleira"]) if "Prateleira" in df.columns else "",
-                                    estante_val=str(df.at[idx, "Estante"]) if "Estante" in df.columns else ""
-                                )
+                                st.success(f"✅ Documento {id_input} desarquivado com sucesso!")
 
                             elif operacao_rearquivar:
                                 # Rearquivar: DESARQUIVADO → ARQUIVADO
@@ -896,27 +924,58 @@ elif aba == "Status":
                                     df.at[idx, "Data Desarquivamento"] = ""
                                 if "Observação Desarquivamento" in df.columns:
                                     df.at[idx, "Observação Desarquivamento"] = ""
+                            
+                            # --- após aplicar a operação (antes de salvar o df principal) ---
+                            novo_status = df.at[idx, "Status"]  # já atualizado acima
+                            mudanca = f"{status_atual.title()} -> {str(novo_status).title()}"
 
-                                # log histórico REARQUIVAMENTO
-                                log_history(
-                                    evento="REARQUIVAMENTO",
-                                    id_val=id_input,
-                                    tipo_doc_val=str(df.at[idx, "Tipo de Documento"]) if "Tipo de Documento" in df.columns else "",
-                                    origem_sub_val=str(df.at[idx, "Origem Documento Submissão"]) if "Origem Documento Submissão" in df.columns else "",
-                                    codificacao_val=str(df.at[idx, "Codificação"]) if "Codificação" in df.columns else "",
-                                    tag_val=str(df.at[idx, "Tag"]) if "Tag" in df.columns else "",
-                                    solicitante_val=(solicitante_operacao or str(df.at[idx, "Solicitante"]) if "Solicitante" in df.columns else ""),
-                                    responsavel_val=responsavel_operacao,
-                                    data_val=pd.to_datetime(data_operacao),
-                                    observacao_val="",
-                                    conteudo_val=str(df.at[idx, "Conteúdo da Caixa"]) if "Conteúdo da Caixa" in df.columns else "",
-                                    local_val=str(df.at[idx, "Local"]) if "Local" in df.columns else "",
-                                    prateleira_val=str(df.at[idx, "Prateleira"]) if "Prateleira" in df.columns else "",
-                                    estante_val=str(df.at[idx, "Estante"]) if "Estante" in df.columns else ""
-                                )
+                            # Capturar conteúdo da caixa do registro atual (se existir)
+                            conteudo_caixa = ""
+                            if "Conteúdo da Caixa" in df.columns:
+                                conteudo_caixa = str(df.at[idx, "Conteúdo da Caixa"])
+
+                            # Observação só existe em desarquivamento parcial
+                            observacao = observacao_operacao.strip() if operacao_desarquivar else ""
+
+                            # Monta registro do histórico
+                            registro_hist = {
+                                "Data da Operação": data_operacao.strftime("%d/%m/%Y"),
+                                "Responsável": responsavel_operacao,
+                                "Mudança": mudanca,
+                                "ID": id_input,
+                                "Conteúdo da Caixa": conteudo_caixa,
+                                "Observação": observacao,
+                            }
+
+                            # === utilitário de leitura da planilha "Historico" ===
+                            # Troque `load_sharepoint_file` pelo leitor que você já usa no app para ler sheets.
+                            try:
+                                df_hist = carregar_excel(file_name, sheet_name="Historico")
+                                # Se vier vazio/None por alguma razão, inicializa
+                                if df_hist is None or not isinstance(df_hist, pd.DataFrame):
+                                    raise Exception("Historico inexistente")
+                            except Exception:
+                                df_hist = pd.DataFrame(columns=[
+                                    "Data da Operação",
+                                    "Responsável",
+                                    "Mudança",
+                                    "ID",
+                                    "Conteúdo da Caixa",
+                                    "Observação",
+                                ])
+
+                            # Anexa a nova linha e salva a aba Historico
+                            df_hist = pd.concat([df_hist, pd.DataFrame([registro_hist])], ignore_index=True)
+
+                            # Salva o histórico primeiro (para não perder o rastro caso o próximo save falhe)
+                            update_sharepoint_file(df_hist, file_name, sheet_name="Historico", keep_existing=True)
+
+
+                                
 
                             # Salva no Excel
                             update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
+                            st.success(f"✅ Documento {id_input} rearquivado com sucesso!")
 
 
                             # Limpa cache e recarrega
@@ -945,7 +1004,9 @@ elif aba == "Status":
     total_desarquivados = len(desarquivados)
     with st.expander(f"📄 Ver Documentos Desarquivados ({total_desarquivados})"):
         if not desarquivados.empty:
-            desarquivados["Data Desarquivamento"] = desarquivados["Data Desarquivamento"]
+            desarquivados["Data Desarquivamento"] = pd.to_datetime(
+                desarquivados["Data Desarquivamento"]
+            ).dt.strftime("%d/%m/%Y")
 
             # Inicializa a coluna se estiver faltando
             if "Observação Desarquivamento" not in desarquivados.columns:
@@ -958,7 +1019,12 @@ elif aba == "Status":
                 "Observação Desarquivamento"
             ]])
 
-
+            # Destaque visual para desarquivamentos parciais (opcional)
+            parciais = desarquivados[desarquivados["Observação Desarquivamento"].str.strip() != ""]
+            if not parciais.empty:
+                st.markdown("**📌 Desarquivamentos Parciais Identificados:**")
+                for _, row in parciais.iterrows():
+                    st.markdown(f"- **ID {row['ID']}**: {row['Observação Desarquivamento']}")
 
         else:
             st.info("Nenhum documento foi desarquivado ainda.")
@@ -1146,6 +1212,235 @@ elif aba == "Consultar":
                 st.dataframe(df_mostrar, use_container_width=True)
 
 
+elif aba == "Editar":
+    st.subheader("✏️ Editar Documentos")
+    st.markdown("Pesquise por ID ou pela combinação de Local, Estante e Prateleira para atualizar registros existentes.")
+    st.caption("As alterações feitas na tabela são salvas apenas após clicar em \"Salvar alterações\".")
+
+    def _get_series(df_src: pd.DataFrame, coluna: str) -> pd.Series:
+        if coluna in df_src.columns:
+            return df_src[coluna]
+        return pd.Series([""] * len(df_src), index=df_src.index)
+
+    def _colunas_preenchidas(df_target: pd.DataFrame) -> list:
+        colunas_validas = []
+        for coluna in df_target.columns:
+            serie = df_target[coluna]
+            serie_sem_na = serie.dropna()
+            if serie_sem_na.empty:
+                continue
+            possui_valor = False
+            for valor in serie_sem_na:
+                if isinstance(valor, str):
+                    if valor.strip():
+                        possui_valor = True
+                        break
+                else:
+                    possui_valor = True
+                    break
+            if possui_valor:
+                colunas_validas.append(coluna)
+        return colunas_validas
+
+    def _formatar_valor(valor):
+        if pd.isna(valor):
+            return ""
+        if isinstance(valor, str):
+            return valor.strip()
+        return str(valor)
+
+    def _renderizar_editor(filtered_df: pd.DataFrame, key_prefix: str):
+        if filtered_df.empty:
+            st.info("Nenhum documento encontrado com os filtros selecionados.")
+            return
+
+        colunas_visiveis = _colunas_preenchidas(filtered_df)
+        if "ID" in filtered_df.columns and "ID" not in colunas_visiveis:
+            colunas_visiveis.insert(0, "ID")
+
+        editor_df = filtered_df[colunas_visiveis].copy()
+        editor_df.insert(0, "__df_index", filtered_df.index)
+        editor_df.reset_index(drop=True, inplace=True)
+
+        # 🔒 Somente estas colunas poderão ser editadas
+        COLS_EDITAVEIS = {"Status", "Conteúdo da Caixa"}
+
+        # (opcional) lista de status para select — ajuste conforme seu domínio
+        lista_status = ["Pendente", "Arquivado", "Em processamento", "Rearquivar", "Conferido"]
+
+        # Configuração por coluna: tudo desabilitado, exceto Status e Conteúdo da Caixa
+        column_config = {
+            "__df_index": st.column_config.NumberColumn(
+                "Linha",
+                help="Identificador interno da linha. Não editar.",
+                disabled=True,
+            )
+        }
+
+        for col in editor_df.columns:
+            if col == "__df_index":
+                continue
+
+            if col in COLS_EDITAVEIS:
+                # Colunas permitidas para edição
+                if col == "Conteúdo da Caixa":
+                    column_config[col] = st.column_config.TextColumn(
+                        "Conteúdo da Caixa",
+                        help="Descreva/ajuste o conteúdo da caixa.",
+                    )
+            else:
+                # Todas as demais colunas ficam somente leitura
+                column_config[col] = st.column_config.Column(
+                    col, disabled=True
+                )
+
+        with st.form(f"{key_prefix}_form"):
+            edited_df = st.data_editor(
+                editor_df,
+                use_container_width=True,
+                num_rows="fixed",
+                key=f"{key_prefix}_editor",
+                column_config=column_config,
+                hide_index=True,
+                # não use disabled=True aqui, senão trava tudo
+            )
+            col_a, col_b = st.columns([2, 1])
+            with col_a:
+                resp_alt = st.selectbox(
+                    "Responsável pela alteração",
+                    responsaveis,
+                    key=f"{key_prefix}_responsavel",
+                )
+            with col_b:
+                st.markdown(f"**Momento da alteração:** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            observacao_alt = st.text_area(
+                "Observações adicionais (opcional)",
+                key=f"{key_prefix}_observacao",
+            )
+            salvar_alt = st.form_submit_button("Salvar alterações", type="primary")
+
+
+        if salvar_alt:
+            if not resp_alt or not str(resp_alt).strip():
+                st.warning("Selecione o responsável pela alteração antes de salvar.")
+                return
+
+            edited_df = pd.DataFrame(edited_df)
+            if "__df_index" not in edited_df.columns:
+                st.error("Não foi possível identificar as linhas editadas.")
+                return
+
+            edited_df.set_index("__df_index", inplace=True)
+            edited_df.index = edited_df.index.astype(int)
+
+            original_df = editor_df.copy()
+            original_df.set_index("__df_index", inplace=True)
+            original_df.index = original_df.index.astype(int)
+
+            alteracoes = {}
+            for idx in edited_df.index:
+                if idx not in original_df.index:
+                    continue
+                mudancas = []
+                for coluna in edited_df.columns:
+                    valor_original = original_df.at[idx, coluna]
+                    valor_novo = edited_df.at[idx, coluna]
+                    if pd.isna(valor_original) and pd.isna(valor_novo):
+                        continue
+                    if _formatar_valor(valor_original) == _formatar_valor(valor_novo):
+                        continue
+                    mudancas.append((coluna, valor_original, valor_novo))
+                if mudancas:
+                    alteracoes[int(idx)] = mudancas
+
+            if not alteracoes:
+                st.info("Nenhuma alteração detectada.")
+                return
+
+            momento_alteracao = datetime.now()
+            for idx, mudancas in alteracoes.items():
+                for coluna, _, valor_novo in mudancas:
+                    df.at[idx, coluna] = valor_novo
+
+                linha_final = edited_df.loc[idx]
+                descricao_alteracoes = "; ".join(
+                    f"{coluna}: '{_formatar_valor(original_df.at[idx, coluna])}' → '{_formatar_valor(novo)}'"
+                    for coluna, _, novo in mudancas
+                )
+                observacao_hist = f"Alterações: {descricao_alteracoes}"
+                if observacao_alt and observacao_alt.strip():
+                    observacao_hist += f". Observação do usuário: {observacao_alt.strip()}"
+
+                log_history(
+                    evento="EDIÇÃO",
+                    id_val=str(linha_final.get("ID", "")),
+                    tipo_doc_val=str(linha_final.get("Tipo de Documento", "")),
+                    origem_sub_val=str(linha_final.get("Origem Documento Submissão", "")),
+                    codificacao_val=str(linha_final.get("codificação", "")),
+                    tag_val=str(linha_final.get("Tag", "")),
+                    solicitante_val=str(linha_final.get("Solicitante", "")),
+                    responsavel_val=str(resp_alt),
+                    data_val=momento_alteracao,
+                    observacao_val=observacao_hist,
+                    conteudo_val=str(linha_final.get("Conteúdo da Caixa", "")),
+                    local_val=str(linha_final.get("Local", "")),
+                    prateleira_val=str(linha_final.get("Prateleira", "")),
+                    estante_val=str(linha_final.get("Estante", "")),
+                )
+
+            update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
+            st.success(f"{len(alteracoes)} registro(s) atualizado(s).")
+
+    id_busca = st.text_input("Pesquisar por ID", key="editar_busca_id").strip().upper()
+    if id_busca:
+        id_series = _get_series(df, "ID").astype(str).str.upper()
+        filtro_id = id_series.str.contains(id_busca, na=False)
+        resultados_id = df[filtro_id].copy() if hasattr(filtro_id, "__len__") else pd.DataFrame()
+        if resultados_id.empty:
+            st.info("Nenhum documento encontrado para o ID informado.")
+        else:
+            st.markdown(f"**Resultados para ID contendo {id_busca}:**")
+            _renderizar_editor(resultados_id, "editar_por_id")
+
+    local_sel = ""
+    estante_sel = ""
+    prateleira_sel = ""
+    with st.expander("Pesquisar por Local, Estante e Prateleira"):
+        col_local, col_estante, col_prateleira = st.columns(3)
+        locais_disponiveis = [""] + sorted(_get_series(df, "Local").dropna().astype(str).str.strip().unique().tolist())
+        with col_local:
+            local_sel = st.selectbox("Local", locais_disponiveis, key="editar_local")
+
+        base_estantes = df
+        if local_sel:
+            mask_local = _get_series(df, "Local").fillna("").astype(str).str.strip().str.upper() == local_sel.strip().upper()
+            base_estantes = df[mask_local].copy()
+        estantes_disponiveis = [""] + sorted(_get_series(base_estantes, "Estante").dropna().astype(str).str.strip().unique().tolist())
+        with col_estante:
+            estante_sel = st.selectbox("Estante", estantes_disponiveis, key="editar_estante")
+
+        base_prateleiras = base_estantes
+        if estante_sel:
+            mask_estante = _get_series(base_estantes, "Estante").fillna("").astype(str).str.strip().str.upper() == estante_sel.strip().upper()
+            base_prateleiras = base_estantes[mask_estante].copy()
+        prateleiras_disponiveis = [""] + sorted(_get_series(base_prateleiras, "Prateleira").dropna().astype(str).str.strip().unique().tolist())
+        with col_prateleira:
+            prateleira_sel = st.selectbox("Prateleira", prateleiras_disponiveis, key="editar_prateleira")
+
+    if local_sel and estante_sel and prateleira_sel:
+        mask_local = _get_series(df, "Local").fillna("").astype(str).str.strip().str.upper() == local_sel.strip().upper()
+        mask_estante = _get_series(df, "Estante").fillna("").astype(str).str.strip().str.upper() == estante_sel.strip().upper()
+        mask_prateleira = _get_series(df, "Prateleira").fillna("").astype(str).str.strip().str.upper() == prateleira_sel.strip().upper()
+        mask_combinado = mask_local & mask_estante & mask_prateleira
+        resultados_combo = df[mask_combinado].copy()
+        if resultados_combo.empty:
+            st.info("Nenhum documento encontrado para a combinação selecionada.")
+        else:
+            st.markdown(f"**Resultados para {local_sel} / {estante_sel} / {prateleira_sel}:**")
+            _renderizar_editor(resultados_combo, "editar_por_posicao")
+    elif any([local_sel, estante_sel, prateleira_sel]):
+        st.caption("Preencha Local, Estante e Prateleira para executar a pesquisa.")
+    
 elif aba == "Desarquivar":
     st.header("📤 Desarquivar Documento")
     id_input = st.text_input("Digite o ID do Documento para desarquivar")
