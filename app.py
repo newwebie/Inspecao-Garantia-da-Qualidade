@@ -3,9 +3,8 @@ import pandas as pd
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 import io, time, re
-import json
 import random
-from sp_connector import SPConnector
+from sp_connector import SPConnector 
 from urllib.parse import quote
 
 # ===== Config via novo secrets =====
@@ -91,7 +90,7 @@ def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "
             existing_sheets[safe_sheet] = df
 
             output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 for name, data in existing_sheets.items():
                     (data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)) \
                         .to_excel(writer, sheet_name=_sanitize_sheet_name(name), index=index)
@@ -119,111 +118,49 @@ def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "
 
 
 # ===== Utilitários de Histórico =====
-HISTORY_REQUIRED_COLUMNS = [
-    "Data",
-    "Responsável",
-    "Tipo de Alteração",
-    "Planilha",
-    "ID",
-    "Alterações",
-    "Antes",
-    "Depois",
-    "Observação",
-]
-
-
-def _ensure_history_columns(df_hist: pd.DataFrame) -> pd.DataFrame:
-    if df_hist is None or df_hist.empty:
-        return pd.DataFrame(columns=HISTORY_REQUIRED_COLUMNS)
-    for col in HISTORY_REQUIRED_COLUMNS:
-        if col not in df_hist.columns:
-            df_hist[col] = ""
-    return df_hist
-
-
-def _stringify(value) -> str:
-    if pd.isna(value):
-        return ""
-    if isinstance(value, (datetime, pd.Timestamp)):
-        return value.isoformat(sep=" ", timespec="seconds")
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
-
-
-def _format_changes(changes) -> str:
-    if not changes:
-        return ""
-    formatted = []
-    for change in changes:
-        if isinstance(change, dict):
-            coluna = change.get("coluna") or change.get("campo") or change.get("col") or change.get("column")
-            antes = change.get("antes")
-            depois = change.get("depois")
-        else:
-            try:
-                coluna, antes, depois = change
-            except Exception:
-                formatted.append(str(change))
-                continue
-        coluna = coluna or "Campo"
-        formatted.append(f"{coluna}: '{_stringify(antes)}' → '{_stringify(depois)}'")
-    return "; ".join(formatted)
-
-
-def _prepare_snapshot(snapshot) -> str:
-    if snapshot is None or snapshot == {} or snapshot == []:
-        return ""
-    if isinstance(snapshot, pd.Series):
-        snapshot = snapshot.to_dict()
-    elif isinstance(snapshot, pd.DataFrame):
-        snapshot = snapshot.to_dict(orient="records")
-    try:
-        return json.dumps(snapshot, ensure_ascii=False, default=_stringify)
-    except Exception:
-        return _stringify(snapshot)
-
-
 def get_history_df() -> pd.DataFrame:
-    """Lê a planilha Histórico/Historico do arquivo no SharePoint."""
+    """Lê a planilha Historico do arquivo no SharePoint. Se não existir, retorna DF vazio com colunas padrão."""
     try:
         content = _sp().download(file_name)
         sheets = pd.read_excel(io.BytesIO(content), sheet_name=None) or {}
-        hist = sheets.get("Histórico") or sheets.get("Historico")
+        hist = sheets.get("Historico", None)
         if isinstance(hist, pd.DataFrame):
-            return _ensure_history_columns(hist)
+            return hist
     except Exception:
         pass
-    return pd.DataFrame(columns=HISTORY_REQUIRED_COLUMNS)
+    return pd.DataFrame(columns=[
+        "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
+        "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+        "Solicitante", "Responsável", "Observação"
+    ])
 
 
-def log_history(evento: str, planilha: str, responsavel: str, data_evento: datetime,
-                registro_id: str = "", alteracoes=None, observacao: str = "",
-                antes_snapshot=None, depois_snapshot=None, extras=None):
-    """Registra uma alteração detalhada na aba Histórico."""
+def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str,
+                codificacao_val: str, tag_val: str, solicitante_val: str, responsavel_val: str,
+                data_val: datetime, observacao_val: str = "",
+                conteudo_val: str = "", local_val: str = "", prateleira_val: str = "",
+                estante_val: str = ""):
+    """Acrescenta uma linha no histórico e salva na sheet Historico mantendo abas existentes."""
     try:
-        hist_df = _ensure_history_columns(get_history_df())
-
+        hist_df = get_history_df()
         nova_linha = {
-            "Data": pd.to_datetime(data_evento),
-            "Responsável": responsavel or "",
-            "Tipo de Alteração": str(evento).upper(),
-            "Planilha": planilha,
-            "ID": registro_id,
-            "Alterações": _format_changes(alteracoes),
-            "Antes": _prepare_snapshot(antes_snapshot),
-            "Depois": _prepare_snapshot(depois_snapshot),
-            "Observação": observacao or "",
+            "Evento": str(evento).upper(),
+            "Data": pd.to_datetime(data_val),
+            "ID": id_val,
+            "Tipo de Documento": tipo_doc_val,
+            "Origem Documento Submissão": origem_sub_val,
+            "Codificação": codificacao_val,
+            "Tag": tag_val,
+            "Conteúdo da Caixa": conteudo_val,
+            "Local": local_val,
+            "Prateleira": prateleira_val,
+            "Estante": estante_val,
+            "Solicitante": solicitante_val,
+            "Responsável": responsavel_val,
+            "Observação": observacao_val or ""
         }
-
-        if extras:
-            for chave, valor in extras.items():
-                if chave not in hist_df.columns:
-                    hist_df[chave] = ""
-                nova_linha[chave] = _stringify(valor)
-
         novo_hist = pd.concat([hist_df, pd.DataFrame([nova_linha])], ignore_index=True)
-        update_sharepoint_file(novo_hist, file_name, sheet_name="Histórico", keep_existing=True)
+        update_sharepoint_file(novo_hist, file_name, sheet_name="Historico", keep_existing=True)
     except Exception as e:
         st.warning(f"Não foi possível registrar histórico: {e}")
 
@@ -663,8 +600,6 @@ if aba == "Cadastrar":
                 st.error(str(e))
                 st.stop()
 
-            momento_registro = datetime.now()
-
             novo_doc = {
                 "ID": unique_id,
                 "Local": local,
@@ -680,7 +615,7 @@ if aba == "Cadastrar":
                 "Departamento Origem": origem_depto,
                 "Origem Documento Submissão": origem_submissao,
                 "Responsável Arquivamento": responsavel,
-                "Data Arquivamento": momento_registro,
+                "Data Arquivamento": datetime.now(),
                 "Período Utilizado Início": data_ini,
                 "Período Utilizado Fim": data_fim,
                 "Status": "ARQUIVADO",
@@ -694,25 +629,38 @@ if aba == "Cadastrar":
             # Salva no SharePoint na aba "Arquivos", mantendo as outras abas
             update_sharepoint_file(df_final, file_name, sheet_name="Arquivos", keep_existing=True)
 
+            # registra histórico de SOLICITAÇÃO e ARQUIVAMENTO
             log_history(
-                evento="INCLUSÃO DE DOCUMENTO",
-                planilha="Arquivos",
-                responsavel=responsavel,
-                data_evento=momento_registro,
-                registro_id=unique_id,
-                alteracoes=[(coluna, "", valor) for coluna, valor in novo_doc.items()],
-                observacao=f"Solicitante: {solicitante}",
-                depois_snapshot=novo_doc,
-                extras={
-                    "Tipo de Documento": tipo_doc,
-                    "Origem Documento Submissão": origem_submissao,
-                    "Codificação": codificacao,
-                    "Tag": tag,
-                    "Conteúdo da Caixa": conteudo,
-                    "Local": local,
-                    "Prateleira": prateleira,
-                    "Estante": estante,
-                },
+                evento="SOLICITACAO_ARQUIVAMENTO",
+                id_val=unique_id,
+                tipo_doc_val=tipo_doc,
+                origem_sub_val=origem_submissao,
+                codificacao_val=codificacao,
+                tag_val=tag,
+                solicitante_val=solicitante,
+                responsavel_val=responsavel,
+                data_val=datetime.now(),
+                observacao_val="",
+                conteudo_val=conteudo,
+                local_val=local,
+                prateleira_val=prateleira,
+                estante_val=estante
+            )
+            log_history(
+                evento="ARQUIVAMENTO",
+                id_val=unique_id,
+                tipo_doc_val=tipo_doc,
+                origem_sub_val=origem_submissao,
+                codificacao_val=codificacao,
+                tag_val=tag,
+                solicitante_val=solicitante,
+                responsavel_val=responsavel,
+                data_val=datetime.now(),
+                observacao_val="",
+                conteudo_val=conteudo,
+                local_val=local,
+                prateleira_val=prateleira,
+                estante_val=estante
             )
             # limpa prefixo aleatório para o próximo cadastro
             st.session_state["rand_prefix"] = None
@@ -944,7 +892,6 @@ elif aba == "Status":
                         try:
                             idx = df[df["ID"] == id_input].index[0]
                             status_atual = str(df.at[idx, "Status"]).strip().upper()
-                            linha_original = df.loc[idx].copy()
 
                             if operacao_desarquivar:
                                 # Bloqueia se já estiver DESARQUIVADO
@@ -977,7 +924,7 @@ elif aba == "Status":
                                     df.at[idx, "Data Desarquivamento"] = ""
                                 if "Observação Desarquivamento" in df.columns:
                                     df.at[idx, "Observação Desarquivamento"] = ""
-
+                            
                             # --- após aplicar a operação (antes de salvar o df principal) ---
                             novo_status = df.at[idx, "Status"]  # já atualizado acima
                             mudanca = f"{status_atual.title()} -> {str(novo_status).title()}"
@@ -989,92 +936,42 @@ elif aba == "Status":
 
                             # Observação só existe em desarquivamento parcial
                             observacao = observacao_operacao.strip() if operacao_desarquivar else ""
-                            linha_atualizada = df.loc[idx].copy()
-                            campos_alterados = ["Status"]
-                            alteracoes = [{"coluna": "Status", "antes": status_atual, "depois": novo_status}]
 
-                            if operacao_desarquivar:
-                                campos_alterados.extend([
-                                    "Responsável Desarquivamento",
-                                    "Data Desarquivamento",
-                                    "Observação Desarquivamento",
-                                ])
-                                alteracoes.extend([
-                                    {
-                                        "coluna": "Responsável Desarquivamento",
-                                        "antes": linha_original.get("Responsável Desarquivamento", ""),
-                                        "depois": linha_atualizada.get("Responsável Desarquivamento", ""),
-                                    },
-                                    {
-                                        "coluna": "Data Desarquivamento",
-                                        "antes": linha_original.get("Data Desarquivamento", ""),
-                                        "depois": linha_atualizada.get("Data Desarquivamento", ""),
-                                    },
-                                    {
-                                        "coluna": "Observação Desarquivamento",
-                                        "antes": linha_original.get("Observação Desarquivamento", ""),
-                                        "depois": linha_atualizada.get("Observação Desarquivamento", ""),
-                                    },
-                                ])
-                            else:
-                                campos_alterados.extend([
-                                    "Responsável Arquivamento",
-                                    "Data Arquivamento",
-                                    "Responsável Desarquivamento",
-                                    "Data Desarquivamento",
-                                    "Observação Desarquivamento",
-                                ])
-                                alteracoes.extend([
-                                    {
-                                        "coluna": "Responsável Arquivamento",
-                                        "antes": linha_original.get("Responsável Arquivamento", ""),
-                                        "depois": linha_atualizada.get("Responsável Arquivamento", ""),
-                                    },
-                                    {
-                                        "coluna": "Data Arquivamento",
-                                        "antes": linha_original.get("Data Arquivamento", ""),
-                                        "depois": linha_atualizada.get("Data Arquivamento", ""),
-                                    },
-                                    {
-                                        "coluna": "Responsável Desarquivamento",
-                                        "antes": linha_original.get("Responsável Desarquivamento", ""),
-                                        "depois": linha_atualizada.get("Responsável Desarquivamento", ""),
-                                    },
-                                    {
-                                        "coluna": "Data Desarquivamento",
-                                        "antes": linha_original.get("Data Desarquivamento", ""),
-                                        "depois": linha_atualizada.get("Data Desarquivamento", ""),
-                                    },
-                                    {
-                                        "coluna": "Observação Desarquivamento",
-                                        "antes": linha_original.get("Observação Desarquivamento", ""),
-                                        "depois": linha_atualizada.get("Observação Desarquivamento", ""),
-                                    },
+                            # Monta registro do histórico
+                            registro_hist = {
+                                "Data da Operação": data_operacao.strftime("%d/%m/%Y"),
+                                "Responsável": responsavel_operacao,
+                                "Mudança": mudanca,
+                                "ID": id_input,
+                                "Conteúdo da Caixa": conteudo_caixa,
+                                "Observação": observacao,
+                            }
+
+                            # === utilitário de leitura da planilha "Historico" ===
+                            # Troque `load_sharepoint_file` pelo leitor que você já usa no app para ler sheets.
+                            try:
+                                df_hist = carregar_excel(file_name, sheet_name="Historico")
+                                # Se vier vazio/None por alguma razão, inicializa
+                                if df_hist is None or not isinstance(df_hist, pd.DataFrame):
+                                    raise Exception("Historico inexistente")
+                            except Exception:
+                                df_hist = pd.DataFrame(columns=[
+                                    "Data da Operação",
+                                    "Responsável",
+                                    "Mudança",
+                                    "ID",
+                                    "Conteúdo da Caixa",
+                                    "Observação",
                                 ])
 
-                            campos_alterados = list(dict.fromkeys(campos_alterados))
-                            antes_snapshot = {campo: linha_original.get(campo, "") for campo in campos_alterados}
-                            depois_snapshot = {campo: linha_atualizada.get(campo, "") for campo in campos_alterados}
-                            momento_operacao = datetime.combine(data_operacao, datetime.now().time())
+                            # Anexa a nova linha e salva a aba Historico
+                            df_hist = pd.concat([df_hist, pd.DataFrame([registro_hist])], ignore_index=True)
 
-                            log_history(
-                                evento="DESARQUIVAMENTO" if operacao_desarquivar else "REARQUIVAMENTO",
-                                planilha="Arquivos",
-                                responsavel=responsavel_operacao,
-                                data_evento=momento_operacao,
-                                registro_id=id_input,
-                                alteracoes=alteracoes,
-                                observacao=f"Mudança: {mudanca}. {('Observação: ' + observacao) if observacao else ''}".strip(),
-                                antes_snapshot=antes_snapshot,
-                                depois_snapshot=depois_snapshot,
-                                extras={
-                                    "Conteúdo da Caixa": conteudo_caixa,
-                                    "Tipo de Documento": linha_atualizada.get("Tipo de Documento", ""),
-                                    "Local": linha_atualizada.get("Local", ""),
-                                    "Prateleira": linha_atualizada.get("Prateleira", ""),
-                                    "Estante": linha_atualizada.get("Estante", ""),
-                                },
-                            )
+                            # Salva o histórico primeiro (para não perder o rastro caso o próximo save falhe)
+                            update_sharepoint_file(df_hist, file_name, sheet_name="Historico", keep_existing=True)
+
+
+                                
 
                             # Salva no Excel
                             update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
@@ -1149,14 +1046,8 @@ elif aba == "⚙️ Opções":
     houve_alteracao = bool(state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"))
 
 
-    col_resp_sel, col_btn_sel = st.columns([2, 1])
-    with col_resp_sel:
-        responsavel_selectboxes_cfg = st.selectbox(
-            "Responsável pela alteração",
-            responsaveis,
-            key="resp_selectboxes_cfg",
-        )
-    with col_btn_sel:
+    col_a, col_b = st.columns([1, 3])
+    with col_a:
         salvar = st.button(
             "Salvar alterações",
             type="primary",
@@ -1167,33 +1058,14 @@ elif aba == "⚙️ Opções":
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar and houve_alteracao:
-        if not responsavel_selectboxes_cfg or not str(responsavel_selectboxes_cfg).strip():
-            st.warning("Selecione o responsável pela alteração antes de salvar.")
-        else:
-            momento_cfg = datetime.now()
-            log_history(
-                evento="ALTERAÇÃO CONFIGURAÇÃO",
-                planilha="Selectboxes",
-                responsavel=str(responsavel_selectboxes_cfg),
-                data_evento=momento_cfg,
-                alteracoes=[
-                    {
-                        "coluna": "Total de linhas",
-                        "antes": len(df_selects),
-                        "depois": len(edited_df),
-                    }
-                ],
-                observacao="Atualização manual das opções de selectboxes.",
-                antes_snapshot=df_selects,
-                depois_snapshot=edited_df,
-            )
+        # Persiste apenas a aba "Selectboxes" no Excel, preservando as demais
+        update_sharepoint_file(edited_df, file_name, sheet_name="Selectboxes", keep_existing=True)
 
-            update_sharepoint_file(edited_df, file_name, sheet_name="Selectboxes", keep_existing=True)
 
-            try:
-                st.rerun()
-            except Exception:
-                pass
+        try:
+            st.rerun()
+        except Exception:
+            pass
 
     st.markdown("---")
     st.header("📅 Período de Retenção")
@@ -1208,49 +1080,20 @@ elif aba == "⚙️ Opções":
 
     houve_alteracao_reten = not df_editado.equals(Retencao_df)
 
-    col_resp_reten, col_btn_reten = st.columns([2, 1])
-    with col_resp_reten:
-        responsavel_reten = st.selectbox(
-            "Responsável pela alteração",
-            responsaveis,
-            key="resp_reten",
-        )
-    with col_btn_reten:
-        salvar_reten = st.button(
-            "Salvar Retenção",
-            type="primary",
-            disabled=not houve_alteracao_reten,
-            key="btn_salvar_reten"
-        )
+    salvar_reten = st.button(
+        "Salvar Retenção",
+        type="primary",
+        disabled=not houve_alteracao_reten,
+        key="btn_salvar_reten"
+    )
 
     if houve_alteracao_reten:
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar_reten and houve_alteracao_reten:
-        if not responsavel_reten or not str(responsavel_reten).strip():
-            st.warning("Selecione o responsável pela alteração antes de salvar.")
-        else:
-            momento_reten = datetime.now()
-            log_history(
-                evento="ALTERAÇÃO CONFIGURAÇÃO",
-                planilha="Retenção",
-                responsavel=str(responsavel_reten),
-                data_evento=momento_reten,
-                alteracoes=[
-                    {
-                        "coluna": "Total de linhas",
-                        "antes": len(Retencao_df),
-                        "depois": len(df_editado),
-                    }
-                ],
-                observacao="Atualização manual dos períodos de retenção.",
-                antes_snapshot=Retencao_df,
-                depois_snapshot=df_editado,
-            )
+        update_sharepoint_file(df_editado, file_name, sheet_name="Retenção", keep_existing=True)
 
-            update_sharepoint_file(df_editado, file_name, sheet_name="Retenção", keep_existing=True)
-
-            st.rerun()
+        st.rerun()
     
 
     st.markdown("---")
@@ -1272,49 +1115,20 @@ elif aba == "⚙️ Opções":
         state_espacos.get("deleted_rows")
     )
 
-    col_resp_espacos, col_btn_espacos = st.columns([2, 1])
-    with col_resp_espacos:
-        responsavel_espacos = st.selectbox(
-            "Responsável pela alteração",
-            responsaveis,
-            key="resp_espacos",
-        )
-    with col_btn_espacos:
-        salvar_espacos = st.button(
-            "Salvar Espaços",
-            type="primary",
-            disabled=not houve_alteracao_espacos,
-            key="btn_salvar_espacos"
-        )
+    salvar_espacos = st.button(
+        "Salvar Espaços",
+        type="primary",
+        disabled=not houve_alteracao_espacos,
+        key="btn_salvar_espacos"
+    )
 
     if houve_alteracao_espacos:
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar_espacos and houve_alteracao_espacos:
-        if not responsavel_espacos or not str(responsavel_espacos).strip():
-            st.warning("Selecione o responsável pela alteração antes de salvar.")
-        else:
-            momento_espacos = datetime.now()
-            log_history(
-                evento="ALTERAÇÃO CONFIGURAÇÃO",
-                planilha="Espaços",
-                responsavel=str(responsavel_espacos),
-                data_evento=momento_espacos,
-                alteracoes=[
-                    {
-                        "coluna": "Total de linhas",
-                        "antes": len(df_espacos),
-                        "depois": len(df_editado_espacos),
-                    }
-                ],
-                observacao="Atualização manual da estrutura de espaços.",
-                antes_snapshot=df_espacos,
-                depois_snapshot=df_editado_espacos,
-            )
+        update_sharepoint_file(df_editado_espacos,file_name, sheet_name="Espaços", keep_existing=True)
 
-            update_sharepoint_file(df_editado_espacos, file_name, sheet_name="Espaços", keep_existing=True)
-
-            st.rerun()
+        st.rerun()
 
 
 
@@ -1523,8 +1337,6 @@ elif aba == "Editar":
             original_df.set_index("__df_index", inplace=True)
             original_df.index = original_df.index.astype(int)
 
-            df_original_global = df.copy()
-
             alteracoes = {}
             for idx in edited_df.index:
                 if idx not in original_df.index:
@@ -1550,8 +1362,7 @@ elif aba == "Editar":
                 for coluna, _, valor_novo in mudancas:
                     df.at[idx, coluna] = valor_novo
 
-                linha_final = df.loc[idx]
-                linha_original_global = df_original_global.loc[idx]
+                linha_final = edited_df.loc[idx]
                 descricao_alteracoes = "; ".join(
                     f"{coluna}: '{_formatar_valor(original_df.at[idx, coluna])}' → '{_formatar_valor(novo)}'"
                     for coluna, _, novo in mudancas
@@ -1562,32 +1373,19 @@ elif aba == "Editar":
 
                 log_history(
                     evento="EDIÇÃO",
-                    planilha="Arquivos",
-                    responsavel=str(resp_alt),
-                    data_evento=momento_alteracao,
-                    registro_id=str(linha_final.get("ID", "")),
-                    alteracoes=[
-                        {
-                            "coluna": coluna,
-                            "antes": original_df.at[idx, coluna],
-                            "depois": novo,
-                        }
-                        for coluna, _, novo in mudancas
-                    ],
-                    observacao=observacao_hist,
-                    antes_snapshot={coluna: linha_original_global.get(coluna, original_df.at[idx, coluna]) for coluna, _, _ in mudancas},
-                    depois_snapshot={coluna: linha_final.get(coluna, "") for coluna, _, _ in mudancas},
-                    extras={
-                        "Tipo de Documento": linha_final.get("Tipo de Documento", ""),
-                        "Origem Documento Submissão": linha_final.get("Origem Documento Submissão", ""),
-                        "Codificação": linha_final.get("Codificação", ""),
-                        "Tag": linha_final.get("Tag", ""),
-                        "Conteúdo da Caixa": linha_final.get("Conteúdo da Caixa", ""),
-                        "Local": linha_final.get("Local", ""),
-                        "Prateleira": linha_final.get("Prateleira", ""),
-                        "Estante": linha_final.get("Estante", ""),
-                        "Solicitante": linha_final.get("Solicitante", ""),
-                    },
+                    id_val=str(linha_final.get("ID", "")),
+                    tipo_doc_val=str(linha_final.get("Tipo de Documento", "")),
+                    origem_sub_val=str(linha_final.get("Origem Documento Submissão", "")),
+                    codificacao_val=str(linha_final.get("codificação", "")),
+                    tag_val=str(linha_final.get("Tag", "")),
+                    solicitante_val=str(linha_final.get("Solicitante", "")),
+                    responsavel_val=str(resp_alt),
+                    data_val=momento_alteracao,
+                    observacao_val=observacao_hist,
+                    conteudo_val=str(linha_final.get("Conteúdo da Caixa", "")),
+                    local_val=str(linha_final.get("Local", "")),
+                    prateleira_val=str(linha_final.get("Prateleira", "")),
+                    estante_val=str(linha_final.get("Estante", "")),
                 )
 
             update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
@@ -1689,86 +1487,60 @@ elif aba == "Histórico":
     if hist.empty:
         st.info("Nenhum histórico registrado ainda.")
     else:
-        hist = _ensure_history_columns(hist)
+        # Normaliza datas
         hist["Data"] = pd.to_datetime(hist["Data"], errors="coerce")
 
-        data_min = hist["Data"].min()
-        data_max = hist["Data"].max()
-        if pd.isna(data_min) or pd.isna(data_max):
-            hoje = datetime.now().date()
-            data_min = hoje
-            data_max = hoje
-        else:
-            data_min = data_min.date()
-            data_max = data_max.date()
-
+        # Filtros
         colf1, colf2, colf3 = st.columns(3)
         with colf1:
-            f_resp = st.selectbox("Responsável", [""] + sorted(hist["Responsável"].dropna().unique().tolist()))
+            f_id = st.text_input("ID")
         with colf2:
-            f_tipo_alteracao = st.selectbox(
-                "Tipo de alteração",
-                [""] + sorted(hist["Tipo de Alteração"].dropna().unique().tolist()),
-            )
+            f_evento = st.selectbox("Evento", [""] + sorted(hist["Evento"].dropna().unique().tolist()))
         with colf3:
-            f_planilha = st.selectbox(
-                "Planilha", [""] + sorted(hist["Planilha"].dropna().unique().tolist())
-            )
+            f_tag = st.selectbox("Tag", [""] + sorted(hist["Tag"].dropna().unique().tolist())) if "Tag" in hist.columns else ""
 
         colf4, colf5, colf6 = st.columns(3)
         with colf4:
-            data_inicial = st.date_input(
-                "Data inicial",
-                value=data_min,
-                format="DD/MM/YYYY",
-            )
+            f_tipo = st.selectbox("Tipo de Documento", [""] + sorted(hist["Tipo de Documento"].dropna().unique().tolist()))
         with colf5:
-            data_final = st.date_input(
-                "Data final",
-                value=data_max,
-                format="DD/MM/YYYY",
-            )
+            f_origem = st.selectbox("Origem Documento Submissão", [""] + sorted(hist["Origem Documento Submissão"].dropna().unique().tolist()))
         with colf6:
-            f_id = st.text_input("ID (contém)")
+            f_cod = st.selectbox("Codificação", [""] + sorted(hist["Codificação"].dropna().unique().tolist()))
 
+        colf7, _ = st.columns(2)
+        with colf7:
+            f_resp = st.selectbox("Responsável", [""] + sorted(hist["Responsável"].dropna().unique().tolist()))
+
+        # Aplica filtros
         filtrado = hist.copy()
+        if f_evento:
+            filtrado = filtrado[filtrado["Evento"] == f_evento]
+        if f_tipo:
+            filtrado = filtrado[filtrado["Tipo de Documento"] == f_tipo]
+        if f_origem:
+            filtrado = filtrado[filtrado["Origem Documento Submissão"] == f_origem]
+        if f_cod:
+            filtrado = filtrado[filtrado["Codificação"] == f_cod]
+        if f_tag:
+            filtrado = filtrado[filtrado["Tag"] == f_tag]
         if f_resp:
             filtrado = filtrado[filtrado["Responsável"] == f_resp]
-        if f_tipo_alteracao:
-            filtrado = filtrado[filtrado["Tipo de Alteração"] == f_tipo_alteracao]
-        if f_planilha:
-            filtrado = filtrado[filtrado["Planilha"] == f_planilha]
-
-        if data_inicial:
-            inicio = datetime.combine(data_inicial, datetime.min.time())
-            filtrado = filtrado[filtrado["Data"] >= inicio]
-        if data_final:
-            fim = datetime.combine(data_final, datetime.max.time())
-            filtrado = filtrado[filtrado["Data"] <= fim]
-
         if f_id:
             filtro_id = f_id.strip().upper()
             filtrado = filtrado[filtrado["ID"].astype(str).str.upper().str.contains(filtro_id, na=False)]
 
         filtrado = filtrado.sort_values("Data", ascending=False)
+        # Formata data para exibição
         show = filtrado.copy()
         show["Data"] = pd.to_datetime(show["Data"]).dt.strftime("%d/%m/%Y %H:%M")
-
-        extra_cols = [
-            c for c in show.columns
-            if c not in HISTORY_REQUIRED_COLUMNS
-        ]
+        # Define ordem de colunas priorizando as solicitadas, exibindo apenas as que existirem
         preferred_cols = [
-            "Data",
-            "Responsável",
-            "Tipo de Alteração",
-            "Planilha",
-            "ID",
-            "Alterações",
-            "Antes",
-            "Depois",
-            "Observação",
-        ] + extra_cols
-
+            "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
+            "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+            "Solicitante", "Responsável", "Observação"
+        ]
         cols_to_show = [c for c in preferred_cols if c in show.columns]
-        st.dataframe(show[cols_to_show], use_container_width=True)
+        if cols_to_show:
+            st.dataframe(show[cols_to_show], use_container_width=True)
+        else:
+            st.dataframe(show, use_container_width=True)
