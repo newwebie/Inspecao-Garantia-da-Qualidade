@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
+from typing import Tuple
 import io, time, re
 import random
 from sp_connector import SPConnector 
@@ -118,21 +119,41 @@ def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "
 
 
 # ===== Utilitários de Histórico =====
-def get_history_df() -> pd.DataFrame:
-    """Lê a planilha Historico do arquivo no SharePoint. Se não existir, retorna DF vazio com colunas padrão."""
+HISTORY_SHEET_PREFERRED = "Histórico"
+HISTORY_SHEET_ALIASES = ("Histórico", "Historico")
+HISTORY_COLUMNS = [
+    "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
+    "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+    "Solicitante", "Responsável", "Observação"
+]
+
+
+def _normalize_history_df(df_hist: pd.DataFrame) -> pd.DataFrame:
+    """Garante que o DataFrame do histórico possua exatamente as colunas esperadas."""
+    df_hist = (df_hist if isinstance(df_hist, pd.DataFrame) else pd.DataFrame()).copy()
+    for coluna in HISTORY_COLUMNS:
+        if coluna not in df_hist.columns:
+            df_hist[coluna] = ""
+    return df_hist[HISTORY_COLUMNS]
+
+
+def get_history_df() -> Tuple[pd.DataFrame, str]:
+    """Lê a planilha de histórico garantindo colunas padrão.
+
+    Retorna o DataFrame normalizado e o nome da aba utilizada (existente ou preferida).
+    """
+    sheet_name = HISTORY_SHEET_PREFERRED
     try:
         content = _sp().download(file_name)
         sheets = pd.read_excel(io.BytesIO(content), sheet_name=None) or {}
-        hist = sheets.get("Historico", None)
-        if isinstance(hist, pd.DataFrame):
-            return hist
+        for possible in HISTORY_SHEET_ALIASES:
+            hist = sheets.get(possible)
+            if isinstance(hist, pd.DataFrame):
+                sheet_name = possible
+                return _normalize_history_df(hist), sheet_name
     except Exception:
         pass
-    return pd.DataFrame(columns=[
-        "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
-        "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
-        "Solicitante", "Responsável", "Observação"
-    ])
+    return _normalize_history_df(pd.DataFrame()), sheet_name
 
 
 def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str,
@@ -142,7 +163,7 @@ def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str
                 estante_val: str = ""):
     """Acrescenta uma linha no histórico e salva na sheet Historico mantendo abas existentes."""
     try:
-        hist_df = get_history_df()
+        hist_df, hist_sheet = get_history_df()
         nova_linha = {
             "Evento": str(evento).upper(),
             "Data": pd.to_datetime(data_val),
@@ -160,7 +181,8 @@ def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str
             "Observação": observacao_val or ""
         }
         novo_hist = pd.concat([hist_df, pd.DataFrame([nova_linha])], ignore_index=True)
-        update_sharepoint_file(novo_hist, file_name, sheet_name="Historico", keep_existing=True)
+        novo_hist = _normalize_history_df(novo_hist)
+        update_sharepoint_file(novo_hist, file_name, sheet_name=hist_sheet, keep_existing=True)
     except Exception as e:
         st.warning(f"Não foi possível registrar histórico: {e}")
 
@@ -1222,9 +1244,14 @@ elif aba == "Editar":
             return df_src[coluna]
         return pd.Series([""] * len(df_src), index=df_src.index)
 
-    def _colunas_preenchidas(df_target: pd.DataFrame) -> list:
+    def _colunas_preenchidas(df_target: pd.DataFrame, obrigatorias=None) -> list:
         colunas_validas = []
+        obrigatorias = set(obrigatorias or [])
         for coluna in df_target.columns:
+            if coluna in obrigatorias:
+                if coluna not in colunas_validas:
+                    colunas_validas.append(coluna)
+                continue
             serie = df_target[coluna]
             serie_sem_na = serie.dropna()
             if serie_sem_na.empty:
@@ -1240,6 +1267,9 @@ elif aba == "Editar":
                     break
             if possui_valor:
                 colunas_validas.append(coluna)
+        for coluna in df_target.columns:
+            if coluna in obrigatorias and coluna not in colunas_validas:
+                colunas_validas.append(coluna)
         return colunas_validas
 
     def _formatar_valor(valor):
@@ -1249,12 +1279,18 @@ elif aba == "Editar":
             return valor.strip()
         return str(valor)
 
+    def _obter_primeiro_valor(serie: pd.Series, *chaves: str) -> str:
+        for chave in chaves:
+            if chave in serie:
+                return serie.get(chave, "")
+        return ""
+
     def _renderizar_editor(filtered_df: pd.DataFrame, key_prefix: str):
         if filtered_df.empty:
             st.info("Nenhum documento encontrado com os filtros selecionados.")
             return
 
-        colunas_visiveis = _colunas_preenchidas(filtered_df)
+        colunas_visiveis = _colunas_preenchidas(filtered_df, COLS_EDITAVEIS)
         if "ID" in filtered_df.columns and "ID" not in colunas_visiveis:
             colunas_visiveis.insert(0, "ID")
 
@@ -1376,7 +1412,7 @@ elif aba == "Editar":
                     id_val=str(linha_final.get("ID", "")),
                     tipo_doc_val=str(linha_final.get("Tipo de Documento", "")),
                     origem_sub_val=str(linha_final.get("Origem Documento Submissão", "")),
-                    codificacao_val=str(linha_final.get("codificação", "")),
+                    codificacao_val=str(_obter_primeiro_valor(linha_final, "Codificação", "codificação")),
                     tag_val=str(linha_final.get("Tag", "")),
                     solicitante_val=str(linha_final.get("Solicitante", "")),
                     responsavel_val=str(resp_alt),
@@ -1483,7 +1519,7 @@ elif aba == "Histórico":
     st.header("🕓 Histórico de Operações")
 
     # Carrega histórico
-    hist = get_history_df()
+    hist, _ = get_history_df()
     if hist.empty:
         st.info("Nenhum histórico registrado ainda.")
     else:
