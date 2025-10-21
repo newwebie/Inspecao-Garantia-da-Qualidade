@@ -32,12 +32,11 @@ def _sp():
 
 # ===== (mantido) saneamento de nome de aba =====
 def _sanitize_sheet_name(name: str) -> str:
-    return (
-        name.replace("[", " ").replace("]", " ")
-            .replace(":", " ").replace("*", " ")
-            .replace("?", " ").replace("/", " ")
-            .replace("\\", " ")
-    )[:31]
+    invalid = ['\\', '/', '?', '*', '[', ']']
+    for ch in invalid:
+        name = name.replace(ch, '_')
+    return (name or "Sheet1")[:31]
+
 
 
 # ===== Carregar Excel (todas as abas que você usa) =====
@@ -68,36 +67,88 @@ def carregar_excel():
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
-def update_sharepoint_file(df: pd.DataFrame, file_path: str, sheet_name: str = "Sheet1",
-                           keep_existing: bool = False, index: bool = False):
+def update_sharepoint_file(file_path: str,
+                           updates: dict[str, pd.DataFrame] | None = None,
+                           *,
+                           # retrocompat:
+                           df: pd.DataFrame | None = None,
+                           sheet_name: str = "Sheet1",
+                           df_hist: pd.DataFrame | None = None,
+                           history_sheet_name: str | None = None,
+                           keep_existing: bool = True,
+                           index: bool = False):
+    """
+    Escreve várias abas de uma vez.
+    Use EITHER `updates={"Aba1": df1, "Aba2": df2}` OR o par (df,sheet) + (df_hist,history_sheet_name).
+    """
+    # validação mínima
     if not isinstance(file_path, str) or not file_path:
         st.error("file_path inválido")
         return
 
-    safe_sheet = _sanitize_sheet_name(sheet_name)
-    attempts = 0
+    # monta o pacote de atualizações
+    write_map: dict[str, pd.DataFrame] = {}
 
+    if updates is not None:
+        # normaliza/sanitiza nomes de abas do dict
+        for k, v in (updates or {}).items():
+            if v is None:
+                continue
+            write_map[_sanitize_sheet_name(k)] = v
+    else:
+        # modo retrocompatível
+        if df is not None:
+            write_map[_sanitize_sheet_name(sheet_name)] = df
+        if df_hist is not None and history_sheet_name:
+            write_map[_sanitize_sheet_name(history_sheet_name)] = df_hist
+
+    if not write_map:
+        st.warning("Nada para salvar: nenhum dataframe fornecido.")
+        return
+
+    attempts = 0
     while True:
         try:
+            # lê workbook atual (se existir) para preservar abas
             existing_sheets = {}
             if keep_existing:
                 try:
-                    # ANTES: content = _download_bytes(rel)
                     content = _sp().download(file_path)
                     existing_sheets = pd.read_excel(io.BytesIO(content), sheet_name=None) or {}
                 except Exception:
                     existing_sheets = {}
 
-            existing_sheets[safe_sheet] = df
+            # aplica apenas as abas pedidas
+            def _append_frames(existing, new):
+                if existing is None or (isinstance(existing, pd.DataFrame) and existing.empty):
+                    return new
+                # une colunas; o que faltar vira NaN
+                all_cols = list(dict.fromkeys(
+                    (list(existing.columns) if isinstance(existing, pd.DataFrame) else []) + list(new.columns)
+                ))
+                if isinstance(existing, pd.DataFrame):
+                    existing = existing.reindex(columns=all_cols)
+                else:
+                    existing = pd.DataFrame(existing).reindex(columns=all_cols)
+                new = new.reindex(columns=all_cols)
+                return pd.concat([existing, new], ignore_index=True)
 
+            # depois (aplica append automático só na aba "Historico")
+            for sheet, data in write_map.items():
+                if _sanitize_sheet_name(sheet).lower() == "historico":
+                    prev = existing_sheets.get(sheet)
+                    existing_sheets[sheet] = _append_frames(prev if isinstance(prev, pd.DataFrame) else None, data)
+                else:
+                    existing_sheets[sheet] = data  # overwrite normal
+
+
+            # escreve de volta
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 for name, data in existing_sheets.items():
                     (data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)) \
                         .to_excel(writer, sheet_name=_sanitize_sheet_name(name), index=index)
             output.seek(0)
-
-            # ANTES: _upload_small(rel, output.read(), overwrite=True)
             _sp().upload_small(file_path, output.read(), overwrite=True)
 
             try:
@@ -153,11 +204,13 @@ def get_history_df() -> Tuple[pd.DataFrame, str]:
                 return _normalize_history_df(hist), sheet_name
     except Exception:
         pass
-    return _normalize_history_df(pd.DataFrame()), sheet_name
+    return pd.DataFrame(columns=[
+        "Mudança", "Data", "ID", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+        "Solicitante", "Responsável", "Observação"
+    ])
 
 
-def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str,
-                codificacao_val: str, tag_val: str, solicitante_val: str, responsavel_val: str,
+def log_history(evento: str, id_val: str, solicitante_val: str, responsavel_val: str,
                 data_val: datetime, observacao_val: str = "",
                 conteudo_val: str = "", local_val: str = "", prateleira_val: str = "",
                 estante_val: str = ""):
@@ -165,13 +218,9 @@ def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str
     try:
         hist_df, hist_sheet = get_history_df()
         nova_linha = {
-            "Evento": str(evento).upper(),
-            "Data": pd.to_datetime(data_val),
+            "Mudança": str(evento).upper(),
+            "Data da Operação": pd.to_datetime(data_val),
             "ID": id_val,
-            "Tipo de Documento": tipo_doc_val,
-            "Origem Documento Submissão": origem_sub_val,
-            "Codificação": codificacao_val,
-            "Tag": tag_val,
             "Conteúdo da Caixa": conteudo_val,
             "Local": local_val,
             "Prateleira": prateleira_val,
@@ -187,9 +236,10 @@ def log_history(evento: str, id_val: str, tipo_doc_val: str, origem_sub_val: str
         st.warning(f"Não foi possível registrar histórico: {e}")
 
 
+
+
 # ===== Configuração da página =====
 st.set_page_config(page_title="Sistema de Arquivo", layout="wide")
-st.title("📂 Sistema de Arquivamento de Documentos")
 
 
 # TABs
@@ -232,8 +282,10 @@ with st.sidebar:
 # ABA: Cadastrar  (ID = PPPP + NNL, com siglas vindas de Selectboxes)
 # -------------------------------------------
 if aba == "Cadastrar":
-    st.header("Cadastrar Novo Documento")
-
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:         
+        st.header("🆕 Cadastrar Documento")
+        st.markdown("<br>", unsafe_allow_html=True)
     # -----------------------------
     # Helpers de nomes de colunas
     # -----------------------------
@@ -649,16 +701,17 @@ if aba == "Cadastrar":
             df_final = pd.concat([df_fresh, pd.DataFrame([novo_doc])], ignore_index=True)
 
             # Salva no SharePoint na aba "Arquivos", mantendo as outras abas
-            update_sharepoint_file(df_final, file_name, sheet_name="Arquivos", keep_existing=True)
+            update_sharepoint_file(
+                file_name,
+                df=df_final,             
+                sheet_name="Arquivos",
+                keep_existing=True
+            )
 
             # registra histórico de SOLICITAÇÃO e ARQUIVAMENTO
             log_history(
                 evento="SOLICITACAO_ARQUIVAMENTO",
                 id_val=unique_id,
-                tipo_doc_val=tipo_doc,
-                origem_sub_val=origem_submissao,
-                codificacao_val=codificacao,
-                tag_val=tag,
                 solicitante_val=solicitante,
                 responsavel_val=responsavel,
                 data_val=datetime.now(),
@@ -671,10 +724,6 @@ if aba == "Cadastrar":
             log_history(
                 evento="ARQUIVAMENTO",
                 id_val=unique_id,
-                tipo_doc_val=tipo_doc,
-                origem_sub_val=origem_submissao,
-                codificacao_val=codificacao,
-                tag_val=tag,
                 solicitante_val=solicitante,
                 responsavel_val=responsavel,
                 data_val=datetime.now(),
@@ -809,27 +858,81 @@ elif aba == "Movimentar":
                 estante = st.selectbox("Nova Estante", estantes_disp)
             with col2:
                 prateleira = st.selectbox("Nova Prateleira", prateleiras_disp)
+            col3 = responsavel_operacao = st.selectbox(
+                    "Responsável pela Operação", 
+                    responsaveis,
+                    key="sb_resp_operacao"
+                )
 
             # Confirmar movimentação para TODOS os elegíveis
             if st.button("Confirmar Movimentação"):
                 idxs = df[df["ID"].astype(str).str.upper().isin(moveis_ids)].index
+
+                # --- (opcional) pegar origem antes de mudar, para registrar na observação ---
+                cols_prev = [c for c in ["Local", "Estante", "Prateleira"] if c in df.columns]
+                origem = ""
+                if cols_prev and len(idxs) > 0:
+                    orig_uniq = (
+                        df.loc[idxs, cols_prev].astype(str).agg("/".join, axis=1).unique()
+                    )
+                    origem = orig_uniq[0] if len(orig_uniq) == 1 else ""
+
+                # === 1) MONTAR UMA ÚNICA LINHA DE HISTÓRICO ===
+                data_operacao = pd.Timestamp.now(tz="America/Sao_Paulo").strftime("%d/%m/%Y")
+                ids_movidos = df.loc[idxs, "ID"].astype(str).tolist()
+                ids_txt = ", ".join(ids_movidos)
+
+                if origem:
+                    observacao = f"{ids_txt} | {origem} → {local}/{estante}/{prateleira}"
+                else:
+                    observacao = f"{ids_txt} | Novos: {local}/{estante}/{prateleira}"
+
+                registro_hist = {
+                    "Data da Operação": data_operacao,
+                    "Responsável": responsavel_operacao,
+                    "Mudança": "Movimentação",
+                    "ID": ids_txt,
+                    "Conteúdo da Caixa": "",   # preencha se quiser agregar algo aqui
+                    "Observação": observacao,
+                }
+
+                # === 2) OPÇÃO A: CARREGA/CRIA 'Historico' E APENDA UMA LINHA PRESERVANDO O QUE JÁ EXISTE ===
+                try:
+                    df_hist = carregar_excel(file_name, sheet_name="Historico")
+                    if df_hist is None or not isinstance(df_hist, pd.DataFrame):
+                        raise Exception("Historico inexistente")
+                except Exception:
+                    df_hist = pd.DataFrame(columns=[
+                        "Data da Operação", "Responsável", "Mudança", "ID", "Conteúdo da Caixa", "Observação"
+                    ])
+
+                # adiciona 1 linha ao final (sem reescrever as anteriores)
+                df_hist.loc[len(df_hist)] = registro_hist
+
+                
+                
+
+                # === 3) APLICAR AS MUDANÇAS NA PLANILHA PRINCIPAL E SALVAR ===
                 df.loc[idxs, "Local"] = local
                 df.loc[idxs, "Estante"] = estante
                 df.loc[idxs, "Prateleira"] = prateleira
 
-                update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
+                # salva a aba 'Historico' mantendo o resto do arquivo
+                update_sharepoint_file(file_name, updates={
+                    "Historico": df_hist,
+                    "Arquivos": df
+                    },
+                    keep_existing=True
+                )
 
                 # Feedback pós-movimentação
-                ids_movidos = df.loc[idxs, "ID"].astype(str).tolist()
                 st.success(f"Movimentação concluída para: {', '.join(ids_movidos)}")
                 if not bloqueados_df.empty:
-                    st.info(f"Os seguintes IDs foram ignorados por estarem DESARQUIVADOS: {', '.join(bloqueados_df['ID'].astype(str).tolist())}")
-        else:
-            if encontrados:  # havia IDs, mas nenhum elegível
-                st.info("Nenhum documento elegível para movimentação (todos DESARQUIVADOS).")
+                    st.info(
+                        "Os seguintes IDs foram ignorados por estarem DESARQUIVADOS: "
+                        + ", ".join(bloqueados_df["ID"].astype(str).tolist())
+                    )
 
-    else:
-        nada = None
 
 #====================================#
 #   DESARQUIVAR
@@ -931,7 +1034,7 @@ elif aba == "Status":
                                     df["Observação Desarquivamento"] = ""
 
                                 df.at[idx, "Observação Desarquivamento"] = observacao_operacao.strip()
-                                st.success(f"✅ Documento {id_input} desarquivado com sucesso!")
+
 
                             elif operacao_rearquivar:
                                 # Rearquivar: DESARQUIVADO → ARQUIVADO
@@ -989,15 +1092,13 @@ elif aba == "Status":
                             # Anexa a nova linha e salva a aba Historico
                             df_hist = pd.concat([df_hist, pd.DataFrame([registro_hist])], ignore_index=True)
 
-                            # Salva o histórico primeiro (para não perder o rastro caso o próximo save falhe)
-                            update_sharepoint_file(df_hist, file_name, sheet_name="Historico", keep_existing=True)
+                            update_sharepoint_file(
+                                file_name,
+                                df=df, sheet_name="Arquivos",
+                                df_hist=df_hist, history_sheet_name="Historico",
+                                keep_existing=True
+                            )
 
-
-                                
-
-                            # Salva no Excel
-                            update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
-                            st.success(f"✅ Documento {id_input} rearquivado com sucesso!")
 
 
                             # Limpa cache e recarrega
@@ -1027,8 +1128,11 @@ elif aba == "Status":
     with st.expander(f"📄 Ver Documentos Desarquivados ({total_desarquivados})"):
         if not desarquivados.empty:
             desarquivados["Data Desarquivamento"] = pd.to_datetime(
-                desarquivados["Data Desarquivamento"]
-            ).dt.strftime("%d/%m/%Y")
+            desarquivados["Data Desarquivamento"],
+            format="%d/%m/%Y",
+            errors="coerce",
+        )
+
 
             # Inicializa a coluna se estiver faltando
             if "Observação Desarquivamento" not in desarquivados.columns:
@@ -1042,7 +1146,8 @@ elif aba == "Status":
             ]])
 
             # Destaque visual para desarquivamentos parciais (opcional)
-            parciais = desarquivados[desarquivados["Observação Desarquivamento"].str.strip() != ""]
+            parciais = desarquivados[desarquivados["Observação Desarquivamento"].astype("string").fillna("").str.contains("parcial", case=False)]
+
             if not parciais.empty:
                 st.markdown("**📌 Desarquivamentos Parciais Identificados:**")
                 for _, row in parciais.iterrows():
@@ -1159,20 +1264,23 @@ elif aba == "⚙️ Opções":
 #   CONSULTAR
 # ===================================#
 elif aba == "Consultar":
-    st.subheader("🔎 Consulta de Documentos")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.subheader("🔎 Consulta de Documentos")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    with st.expander("🔍 Buscar por Codificação"):
-        opcoes_cod = sorted(df["Codificação"].dropna().unique())
-        opcoes_cod = sorted(df["Codificação"].dropna().unique())
-        cod_select = st.selectbox("Selecione a Codificação do Documento", [""] + list(opcoes_cod))
+    st.subheader("📄 Buscar por Codificação")
+    opcoes_cod = sorted(df["Codificação"].dropna().unique())
+    opcoes_cod = sorted(df["Codificação"].dropna().unique())
+    cod_select = st.selectbox("Selecione a Codificação do Documento", [""] + list(opcoes_cod))
 
-        if st.button("Buscar por Codificação") and cod_select:
-            resultado = df[df["Codificação"] == cod_select].copy()
-            if not resultado.empty:
-                resultado["Data Arquivamento"] = pd.to_datetime(resultado["Data Arquivamento"]).dt.strftime("%d/%m/%Y")
-                st.dataframe(resultado[["ID","Status", "Conteúdo da Caixa", "Tipo de Documento","Departamento Origem", "Local", "Estante", "Prateleira", "Caixa", "Responsável Arquivamento", "Data Arquivamento"]])
-            else:
-                st.warning("Nenhum documento encontrado com esta codificação.")
+    if st.button("Buscar por Codificação") and cod_select:
+        resultado = df[df["Codificação"] == cod_select].copy()
+        if not resultado.empty:
+            resultado["Data Arquivamento"] = pd.to_datetime(resultado["Data Arquivamento"]).dt.strftime("%d/%m/%Y")
+            st.dataframe(resultado[["ID","Status", "Conteúdo da Caixa", "Tipo de Documento","Departamento Origem", "Local", "Estante", "Prateleira", "Caixa", "Responsável Arquivamento", "Data Arquivamento"]])
+        else:
+            st.warning("Nenhum documento encontrado com esta codificação.")
     st.markdown("<br>", unsafe_allow_html=True)
 
     st.subheader("📅 Buscar por Período")
@@ -1410,10 +1518,6 @@ elif aba == "Editar":
                 log_history(
                     evento="EDIÇÃO",
                     id_val=str(linha_final.get("ID", "")),
-                    tipo_doc_val=str(linha_final.get("Tipo de Documento", "")),
-                    origem_sub_val=str(linha_final.get("Origem Documento Submissão", "")),
-                    codificacao_val=str(_obter_primeiro_valor(linha_final, "Codificação", "codificação")),
-                    tag_val=str(linha_final.get("Tag", "")),
                     solicitante_val=str(linha_final.get("Solicitante", "")),
                     responsavel_val=str(resp_alt),
                     data_val=momento_alteracao,
@@ -1524,55 +1628,35 @@ elif aba == "Histórico":
         st.info("Nenhum histórico registrado ainda.")
     else:
         # Normaliza datas
-        hist["Data"] = pd.to_datetime(hist["Data"], errors="coerce")
+        hist["Data da Operação"] = pd.to_datetime(hist["Data da Operação"], errors="coerce")
 
         # Filtros
         colf1, colf2, colf3 = st.columns(3)
         with colf1:
             f_id = st.text_input("ID")
         with colf2:
-            f_evento = st.selectbox("Evento", [""] + sorted(hist["Evento"].dropna().unique().tolist()))
+            f_evento = st.selectbox("Mudança", [""] + sorted(hist["Mudança"].dropna().unique().tolist()))
         with colf3:
-            f_tag = st.selectbox("Tag", [""] + sorted(hist["Tag"].dropna().unique().tolist())) if "Tag" in hist.columns else ""
-
-        colf4, colf5, colf6 = st.columns(3)
-        with colf4:
-            f_tipo = st.selectbox("Tipo de Documento", [""] + sorted(hist["Tipo de Documento"].dropna().unique().tolist()))
-        with colf5:
-            f_origem = st.selectbox("Origem Documento Submissão", [""] + sorted(hist["Origem Documento Submissão"].dropna().unique().tolist()))
-        with colf6:
-            f_cod = st.selectbox("Codificação", [""] + sorted(hist["Codificação"].dropna().unique().tolist()))
-
-        colf7, _ = st.columns(2)
-        with colf7:
             f_resp = st.selectbox("Responsável", [""] + sorted(hist["Responsável"].dropna().unique().tolist()))
 
         # Aplica filtros
         filtrado = hist.copy()
         if f_evento:
-            filtrado = filtrado[filtrado["Evento"] == f_evento]
-        if f_tipo:
-            filtrado = filtrado[filtrado["Tipo de Documento"] == f_tipo]
-        if f_origem:
-            filtrado = filtrado[filtrado["Origem Documento Submissão"] == f_origem]
-        if f_cod:
-            filtrado = filtrado[filtrado["Codificação"] == f_cod]
-        if f_tag:
-            filtrado = filtrado[filtrado["Tag"] == f_tag]
+            filtrado = filtrado[filtrado["Mudança"] == f_evento]
         if f_resp:
             filtrado = filtrado[filtrado["Responsável"] == f_resp]
         if f_id:
             filtro_id = f_id.strip().upper()
             filtrado = filtrado[filtrado["ID"].astype(str).str.upper().str.contains(filtro_id, na=False)]
 
-        filtrado = filtrado.sort_values("Data", ascending=False)
+
+        filtrado = filtrado.sort_values("Data da Operação", ascending=False)
         # Formata data para exibição
         show = filtrado.copy()
-        show["Data"] = pd.to_datetime(show["Data"]).dt.strftime("%d/%m/%Y %H:%M")
+        show["Data da Operação"] = pd.to_datetime(show["Data da Operação"]).dt.strftime("%d/%m/%Y %H:%M")
         # Define ordem de colunas priorizando as solicitadas, exibindo apenas as que existirem
         preferred_cols = [
-            "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
-            "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
+            "Mudança", "Data da Operação", "ID", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
             "Solicitante", "Responsável", "Observação"
         ]
         cols_to_show = [c for c in preferred_cols if c in show.columns]
