@@ -231,7 +231,7 @@ def log_history(evento: str, id_val: str, solicitante_val: str, responsavel_val:
         }
         novo_hist = pd.concat([hist_df, pd.DataFrame([nova_linha])], ignore_index=True)
         novo_hist = _normalize_history_df(novo_hist)
-        update_sharepoint_file(novo_hist, file_name, sheet_name=hist_sheet, keep_existing=True)
+        update_sharepoint_file(file_name, novo_hist, sheet_name=hist_sheet, keep_existing=True)
     except Exception as e:
         st.warning(f"Não foi possível registrar histórico: {e}")
 
@@ -613,8 +613,8 @@ if aba == "Cadastrar":
 
             data_fim = st.date_input("Período Utilizado - Fim", format="DD/MM/YYYY", key="dt_fim")
     else:
-        data_ini = None
-        data_fim = None
+        data_ini = "N/A"
+        data_fim = "N/A"
         for key in ("dt_ini", "dt_fim"):
             st.session_state.pop(key, None)
 
@@ -706,7 +706,7 @@ if aba == "Cadastrar":
                 "Responsável Arquivamento": responsavel,
                 "Data Arquivamento": datetime.now(),
                 "Período Utilizado Início": data_ini,
-                "Período Utilizado Fim": data_fim,
+                "Período Utilizado Fim": data_fim,  
                 "Status": "ARQUIVADO",
                 "Período de Retenção": retencao_selecionada,
                 "Data Prevista de Descarte": data_prevista_descarte,
@@ -1127,7 +1127,7 @@ elif aba == "Status":
 
                             
                             # Salva no Excel
-                            update_sharepoint_file(df, file_name, sheet_name="Arquivos", keep_existing=True)
+                            update_sharepoint_file(file_name, df, sheet_name="Arquivos", keep_existing=True)
 
                             
                             # Limpa o cache e recarrega
@@ -1203,7 +1203,7 @@ elif aba == "⚙️ Opções":
 
     if salvar and houve_alteracao:
         # Persiste apenas a aba "Selectboxes" no Excel, preservando as demais
-        update_sharepoint_file(edited_df, file_name, sheet_name="Selectboxes", keep_existing=True)
+        update_sharepoint_file(file_name, edited_df, sheet_name="Selectboxes", keep_existing=True)
 
 
         try:
@@ -1235,7 +1235,7 @@ elif aba == "⚙️ Opções":
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar_reten and houve_alteracao_reten:
-        update_sharepoint_file(df_editado, file_name, sheet_name="Retenção", keep_existing=True)
+        update_sharepoint_file(file_name, df_editado, sheet_name="Retenção", keep_existing=True)
 
         st.rerun()
     
@@ -1270,7 +1270,7 @@ elif aba == "⚙️ Opções":
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar_espacos and houve_alteracao_espacos:
-        update_sharepoint_file(df_editado_espacos,file_name, sheet_name="Espaços", keep_existing=True)
+        update_sharepoint_file(file_name, df_editado_espacos, sheet_name="Espaços", keep_existing=True)
 
         st.rerun()
 
@@ -1641,43 +1641,9 @@ elif aba == "Histórico":
 
     # Carrega histórico
     hist, _ = get_history_df()
+
     if hist.empty:
         st.info("Nenhum histórico registrado ainda.")
     else:
-        # Normaliza datas
-        hist["Data da Operação"] = pd.to_datetime(hist["Data da Operação"], errors="coerce")
-
-        # Filtros
-        colf1, colf2, colf3 = st.columns(3)
-        with colf1:
-            f_id = st.text_input("ID")
-        with colf2:
-            f_evento = st.selectbox("Mudança", [""] + sorted(hist["Mudança"].dropna().unique().tolist()))
-        with colf3:
-            f_resp = st.selectbox("Responsável", [""] + sorted(hist["Responsável"].dropna().unique().tolist()))
-
-        # Aplica filtros
-        filtrado = hist.copy()
-        if f_evento:
-            filtrado = filtrado[filtrado["Mudança"] == f_evento]
-        if f_resp:
-            filtrado = filtrado[filtrado["Responsável"] == f_resp]
-        if f_id:
-            filtro_id = f_id.strip().upper()
-            filtrado = filtrado[filtrado["ID"].astype(str).str.upper().str.contains(filtro_id, na=False)]
-
-
-        filtrado = filtrado.sort_values("Data da Operação", ascending=False)
-        # Formata data para exibição
-        show = filtrado.copy()
-        show["Data da Operação"] = pd.to_datetime(show["Data da Operação"]).dt.strftime("%d/%m/%Y %H:%M")
-        # Define ordem de colunas priorizando as solicitadas, exibindo apenas as que existirem
-        preferred_cols = [
-            "Mudança", "Data da Operação", "ID", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
-            "Solicitante", "Responsável", "Observação"
-        ]
-        cols_to_show = [c for c in preferred_cols if c in show.columns]
-        if cols_to_show:
-            st.dataframe(show[cols_to_show], use_container_width=True)
-        else:
-            st.dataframe(show, use_container_width=True)
+        # Espelho literal do DF, sem qualquer transformação
+        st.dataframe(hist, use_container_width=True)
