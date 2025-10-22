@@ -566,13 +566,6 @@ if aba == "Cadastrar":
             except Exception:
                 pass
 
-    tipo_cadastro_opcoes = doc_op[:] if doc_op else [""]
-
-    tipo_cadastro = st.selectbox(
-        "Tipo de Cadastro*",
-        tipo_cadastro_opcoes,
-        key="sb_tipo_cadastro"
-    )
 
     conteudo = st.text_input("Conteúdo da Caixa*")
 
@@ -611,7 +604,7 @@ if aba == "Cadastrar":
 
         codificacao = st.text_input("Codificação", key="tx_codificacao") or "N/A"
 
-    if tipo_cadastro == "Logbook":
+    if tipo_doc == "LOGBOOK":
         col9, col10 = st.columns(2)
         with col9:
             data_ini = st.date_input("Período Utilizado - Início", format="DD/MM/YYYY", key="dt_ini")
@@ -686,7 +679,6 @@ if aba == "Cadastrar":
             estante,
             tipo_doc,
             origem_submissao,
-            tipo_cadastro,
         ]
         if any((c is None) or (str(c).strip() == "") for c in obrig):
             st.warning("Preencha todos os campos obrigatórios e selecione as opções válidas.")
@@ -707,7 +699,6 @@ if aba == "Cadastrar":
                 "Tag": tag,
                 "Livro": livro,
                 "Lacre": lacre,
-                "Tipo de Cadastro": tipo_cadastro,
                 "Tipo de Documento": tipo_doc,
                 "Conteúdo da Caixa": conteudo,
                 "Departamento Origem": origem_depto,
