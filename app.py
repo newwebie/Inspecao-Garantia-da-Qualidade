@@ -566,72 +566,83 @@ if aba == "Cadastrar":
             except Exception:
                 pass
 
-    # Form para campos que NÃO devem recarregar o sistema
-    with st.form("form_campos_estaticos", clear_on_submit=True):
-        conteudo = st.text_input("Conteúdo da Caixa*")
+    tipo_cadastro_opcoes = doc_op[:] if doc_op else [""]
 
-        col3, col4 = st.columns(2)
-        with col3:
-            origem_submissao = st.selectbox(
-                "Origem Documento Submissão*",
-                origens_submissao,
-                key="sb_origem_submissao"
-            )
-        with col4:
-            local_atual = st.session_state.get("local", local_op[0] if local_op else "")
-            try:
-                idx_local = local_op.index(local_atual)
-            except ValueError:
-                idx_local = 0
+    tipo_cadastro = st.selectbox(
+        "Tipo de Cadastro*",
+        tipo_cadastro_opcoes,
+        key="sb_tipo_cadastro"
+    )
 
-            local = st.selectbox(
-                "Local*",
-                local_op,
-                index=idx_local if local_op else 0,
-                key="sb_local"
-            )
-            st.session_state.local = local
+    conteudo = st.text_input("Conteúdo da Caixa*")
 
-        col5, col6 = st.columns(2)
-        with col5:
-            estante = st.text_input("Estante*", key="tx_estante")
-        with col6:
-            prateleira = st.text_input("Prateleira*", key="tx_prateleira")
+    col3, col4 = st.columns(2)
+    with col3:
+        origem_submissao = st.selectbox(
+            "Origem Documento Submissão*",
+            origens_submissao,
+            key="sb_origem_submissao"
+        )
+    with col4:
+        local_atual = st.session_state.get("local", local_op[0] if local_op else "")
+        try:
+            idx_local = local_op.index(local_atual)
+        except ValueError:
+            idx_local = 0
 
-        col7, col8 = st.columns(2)
-        with col7:
-            caixa = st.text_input("Caixa*", key="tx_caixa")
-        with col8:
-            
-            codificacao = st.text_input("Codificação", key="tx_codificacao") or "N/A"
+        local = st.selectbox(
+            "Local*",
+            local_op,
+            index=idx_local if local_op else 0,
+            key="sb_local"
+        )
+        st.session_state.local = local
 
+    col5, col6 = st.columns(2)
+    with col5:
+        estante = st.text_input("Estante*", key="tx_estante")
+    with col6:
+        prateleira = st.text_input("Prateleira*", key="tx_prateleira")
+
+    col7, col8 = st.columns(2)
+    with col7:
+        caixa = st.text_input("Caixa*", key="tx_caixa")
+    with col8:
+
+        codificacao = st.text_input("Codificação", key="tx_codificacao") or "N/A"
+
+    if tipo_cadastro == "Logbook":
         col9, col10 = st.columns(2)
         with col9:
             data_ini = st.date_input("Período Utilizado - Início", format="DD/MM/YYYY", key="dt_ini")
-            
+
         with col10:
-            
+
             data_fim = st.date_input("Período Utilizado - Fim", format="DD/MM/YYYY", key="dt_fim")
+    else:
+        data_ini = None
+        data_fim = None
+        for key in ("dt_ini", "dt_fim"):
+            st.session_state.pop(key, None)
 
-        col11, col12 = st.columns(2)
-        with col11:
-            tag = st.text_input("TAG", key="tx_tag") or "N/A"
-        with col12:
-            lacre = st.text_input("Lacre", key="tx_lacre") or "N/A"
+    col11, col12 = st.columns(2)
+    with col11:
+        tag = st.text_input("TAG", key="tx_tag") or "N/A"
+    with col12:
+        lacre = st.text_input("Lacre", key="tx_lacre") or "N/A"
 
-        col13, col14 = st.columns(2)
-        with col13:
-            livro = st.text_input("Livro", key="tx_livro")
-        with col14:
-            solicitante = st.text_input("Solicitante*", key="tx_solic")
+    col13, col14 = st.columns(2)
+    with col13:
+        livro = st.text_input("Livro", key="tx_livro")
+    with col14:
+        solicitante = st.text_input("Solicitante*", key="tx_solic")
 
-        # Responsável pelo Arquivamento fica sozinho na última linha
-        responsavel = st.selectbox("Responsável pelo Arquivamento*", responsaveis, key="sb_resp")
+    # Responsável pelo Arquivamento fica sozinho na última linha
+    responsavel = st.selectbox("Responsável pelo Arquivamento*", responsaveis, key="sb_resp")
 
-        # Botão Cadastrar dentro do form
-        colA, colB = st.columns([1, 3])
-        with colA:
-            cadastrar = st.form_submit_button("Cadastrar", type="primary", use_container_width=True)
+    colA, colB = st.columns([1, 3])
+    with colA:
+        cadastrar = st.button("Cadastrar", type="primary", key="btn_cadastrar")
 
     # Define e mostra apenas o ID atual (próximo disponível para o prefixo selecionado)
     if origem_depto and tipo_doc:
@@ -664,7 +675,19 @@ if aba == "Cadastrar":
 
     # Fluxo: Cadastrar
     if cadastrar and not st.session_state.ja_salvou:
-        obrig = [caixa, conteudo, origem_depto, solicitante, responsavel, prateleira, local, estante, tipo_doc, origem_submissao]
+        obrig = [
+            caixa,
+            conteudo,
+            origem_depto,
+            solicitante,
+            responsavel,
+            prateleira,
+            local,
+            estante,
+            tipo_doc,
+            origem_submissao,
+            tipo_cadastro,
+        ]
         if any((c is None) or (str(c).strip() == "") for c in obrig):
             st.warning("Preencha todos os campos obrigatórios e selecione as opções válidas.")
         else:
@@ -684,6 +707,7 @@ if aba == "Cadastrar":
                 "Tag": tag,
                 "Livro": livro,
                 "Lacre": lacre,
+                "Tipo de Cadastro": tipo_cadastro,
                 "Tipo de Documento": tipo_doc,
                 "Conteúdo da Caixa": conteudo,
                 "Departamento Origem": origem_depto,
@@ -741,6 +765,8 @@ if aba == "Cadastrar":
             st.cache_data.clear()
 
             st.info(f"O ID gerado é: {unique_id}")
+    else:
+        st.session_state.ja_salvou = False
 
 
 
