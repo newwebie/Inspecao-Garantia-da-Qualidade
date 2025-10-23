@@ -173,9 +173,7 @@ def update_sharepoint_file(file_path: str,
 HISTORY_SHEET_PREFERRED = "Histórico"
 HISTORY_SHEET_ALIASES = ("Histórico", "Historico")
 HISTORY_COLUMNS = [
-    "Evento", "Data", "ID", "Tipo de Documento", "Origem Documento Submissão",
-    "Codificação", "Tag", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
-    "Solicitante", "Responsável", "Observação"
+    "Data", "Mudança", "ID", "Conteúdo da Caixa", "Observação", "Responsável"
 ]
 
 
@@ -205,27 +203,21 @@ def get_history_df() -> Tuple[pd.DataFrame, str]:
     except Exception:
         pass
     return pd.DataFrame(columns=[
-        "Mudança", "Data", "ID", "Conteúdo da Caixa", "Local", "Prateleira", "Estante",
-        "Solicitante", "Responsável", "Observação"
+        "Mudança", "Data", "ID", "Conteúdo da Caixa", "Responsável", "Observação"
     ])
 
 
-def log_history(evento: str, id_val: str, solicitante_val: str, responsavel_val: str,
+def log_history(evento: str, id_val: str, responsavel_val: str,
                 data_val: datetime, observacao_val: str = "",
-                conteudo_val: str = "", local_val: str = "", prateleira_val: str = "",
-                estante_val: str = ""):
+                conteudo_val: str = ""):
     """Acrescenta uma linha no histórico e salva na sheet Historico mantendo abas existentes."""
     try:
         hist_df, hist_sheet = get_history_df()
         nova_linha = {
             "Mudança": str(evento).upper(),
-            "Data da Operação": pd.to_datetime(data_val),
+            "Data": pd.to_datetime(data_val),
             "ID": id_val,
             "Conteúdo da Caixa": conteudo_val,
-            "Local": local_val,
-            "Prateleira": prateleira_val,
-            "Estante": estante_val,
-            "Solicitante": solicitante_val,
             "Responsável": responsavel_val,
             "Observação": observacao_val or ""
         }
@@ -554,17 +546,7 @@ if aba == "Cadastrar":
             key="sb_origem"
         )
 
-    # Retenção + descarte (calculado baseado em origem_depto)
-    retencao_selecionada, data_prevista_descarte = None, None
-    if origem_depto:
-        filtro = Retencao_df[Retencao_df["ORIGEM DOCUMENTO SUBMISSÃO"] == origem_depto]
-        if not filtro.empty:
-            retencao_selecionada = str(filtro["Retenção"].iloc(0) if hasattr(filtro["Retenção"], 'iloc') else filtro["Retenção"]).split()[0]
-            try:
-                anos_reten = int(str(retencao_selecionada).split()[0])
-                data_prevista_descarte = datetime.now() + relativedelta(years=anos_reten)
-            except Exception:
-                pass
+    
 
 
     conteudo = st.text_input("Conteúdo da Caixa*")
@@ -576,6 +558,19 @@ if aba == "Cadastrar":
             origens_submissao,
             key="sb_origem_submissao"
         )
+    
+    # Retenção + descarte (calculado baseado em origem_depto)
+    retencao_selecionada, data_prevista_descarte = None, None
+    if origem_submissao:
+        filtro = Retencao_df[Retencao_df["ORIGEM DOCUMENTO SUBMISSÃO"] == origem_submissao]
+        if not filtro.empty:
+            retencao_selecionada = str(filtro["Retenção"].iloc[0] if hasattr(filtro["Retenção"], 'iloc') else filtro["Retenção"]).split()[0]
+            try:
+                anos_reten = int(str(retencao_selecionada).split()[0])
+                data_prevista_descarte = datetime.now() + relativedelta(years=anos_reten)
+            except Exception:
+                pass
+
     with col4:
         local_atual = st.session_state.get("local", local_op[0] if local_op else "")
         try:
@@ -723,31 +718,7 @@ if aba == "Cadastrar":
                 keep_existing=True
             )
 
-            # registra histórico de SOLICITAÇÃO e ARQUIVAMENTO
-            log_history(
-                evento="SOLICITACAO_ARQUIVAMENTO",
-                id_val=unique_id,
-                solicitante_val=solicitante,
-                responsavel_val=responsavel,
-                data_val=datetime.now(),
-                observacao_val="",
-                conteudo_val=conteudo,
-                local_val=local,
-                prateleira_val=prateleira,
-                estante_val=estante
-            )
-            log_history(
-                evento="ARQUIVAMENTO",
-                id_val=unique_id,
-                solicitante_val=solicitante,
-                responsavel_val=responsavel,
-                data_val=datetime.now(),
-                observacao_val="",
-                conteudo_val=conteudo,
-                local_val=local,
-                prateleira_val=prateleira,
-                estante_val=estante
-            )
+
             # limpa prefixo aleatório para o próximo cadastro
             st.session_state["rand_prefix"] = None
             st.session_state["rand_tipo"] = None
@@ -904,12 +875,25 @@ elif aba == "Movimentar":
                 else:
                     observacao = f"{ids_txt} | Novos: {local}/{estante}/{prateleira}"
 
+                if "Conteúdo da Caixa" in df.columns:
+                    conteudos_df = df.loc[idxs, ["ID", "Conteúdo da Caixa"]].astype(str)
+                    # Se for só 1 ID, pega direto; se forem vários, lista "ID: Conteúdo" para cada
+                    if len(ids_movidos) == 1:
+                        conteudo_txt = conteudos_df["Conteúdo da Caixa"].iloc[0]
+                    else:
+                        conteudo_txt = "; ".join(
+                            f"{row['ID']}: {row['Conteúdo da Caixa']}"
+                            for _, row in conteudos_df.iterrows()
+                        )
+                else:
+                    conteudo_txt = ""
+
                 registro_hist = {
-                    "Data da Operação": data_operacao,
+                    "Data": data_operacao,
                     "Responsável": responsavel_operacao,
                     "Mudança": "Movimentação",
                     "ID": ids_txt,
-                    "Conteúdo da Caixa": "",   # preencha se quiser agregar algo aqui
+                    "Conteúdo da Caixa": conteudo_txt,   
                     "Observação": observacao,
                 }
 
@@ -920,7 +904,7 @@ elif aba == "Movimentar":
                         raise Exception("Historico inexistente")
                 except Exception:
                     df_hist = pd.DataFrame(columns=[
-                        "Data da Operação", "Responsável", "Mudança", "ID", "Conteúdo da Caixa", "Observação"
+                        "Data", "Responsável", "Mudança", "ID", "Conteúdo da Caixa", "Observação"
                     ])
 
                 # adiciona 1 linha ao final (sem reescrever as anteriores)
@@ -1009,7 +993,7 @@ elif aba == "Status":
                 )
                 
                 data_operacao = st.date_input(
-                    "Data da Operação",
+                    "Data",
                     value=datetime.now().date(),
                     format="DD/MM/YYYY",
                     key="dt_operacao"
@@ -1068,10 +1052,15 @@ elif aba == "Status":
                                     df.at[idx, "Observação Desarquivamento"] = ""
                             
                             # --- após aplicar a operação (antes de salvar o df principal) ---
-                            novo_status = df.at[idx, "Status"]  # já atualizado acima
-                            mudanca = f"{status_atual.title()} -> {str(novo_status).title()}"
+                            # O que foi flegado vira a Mudança
+                            if operacao_desarquivar:
+                                acao_mudanca = "Desarquivar (Parcial)" if st.session_state.get("cb_parcial") else "Desarquivar"
+                            elif operacao_rearquivar:
+                                acao_mudanca = "Rearquivar"
+                            else:
+                                acao_mudanca = ""
 
-                            # Capturar conteúdo da caixa do registro atual (se existir)
+                            # Capturar conteúdo da caixa (se existir)
                             conteudo_caixa = ""
                             if "Conteúdo da Caixa" in df.columns:
                                 conteudo_caixa = str(df.at[idx, "Conteúdo da Caixa"])
@@ -1079,11 +1068,11 @@ elif aba == "Status":
                             # Observação só existe em desarquivamento parcial
                             observacao = observacao_operacao.strip() if operacao_desarquivar else ""
 
-                            # Monta registro do histórico
+                            # Monta registro do histórico com a ação flegada
                             registro_hist = {
-                                "Data da Operação": data_operacao.strftime("%d/%m/%Y"),
+                                "Data": data_operacao.strftime("%d/%m/%Y"),
                                 "Responsável": responsavel_operacao,
-                                "Mudança": mudanca,
+                                "Mudança": acao_mudanca,   # << mudou aqui
                                 "ID": id_input,
                                 "Conteúdo da Caixa": conteudo_caixa,
                                 "Observação": observacao,
@@ -1098,7 +1087,7 @@ elif aba == "Status":
                                     raise Exception("Historico inexistente")
                             except Exception:
                                 df_hist = pd.DataFrame(columns=[
-                                    "Data da Operação",
+                                    "Data",
                                     "Responsável",
                                     "Mudança",
                                     "ID",
@@ -1645,5 +1634,68 @@ elif aba == "Histórico":
     if hist.empty:
         st.info("Nenhum histórico registrado ainda.")
     else:
-        # Espelho literal do DF, sem qualquer transformação
-        st.dataframe(hist, use_container_width=True)
+        # Normalização leve dos nomes (sem alias/renomeação)
+        hist.columns = (
+            hist.columns.astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+        )
+
+        # --- Escolhe dinamicamente qual coluna de data usar ---
+        date_col = None
+        if "Data" in hist.columns:
+            date_col = "Data"
+        elif "Data da Operação" in hist.columns:
+            date_col = "Data da Operação"
+
+        # Filtros simples (iguais aos que você já tinha)
+        colf1, colf2, colf3 = st.columns(3)
+        with colf1:
+            f_id = st.text_input("ID", "")
+        with colf2:
+            eventos = [""] + (sorted(hist["Mudança"].dropna().unique().tolist())
+                              if "Mudança" in hist.columns else [])
+            f_evento = st.selectbox("Mudança", eventos, index=0)
+        with colf3:
+            resps = [""] + (sorted(hist["Responsável"].dropna().unique().tolist())
+                            if "Responsável" in hist.columns else [])
+            f_resp = st.selectbox("Responsável", resps, index=0)
+
+        # Aplica filtros
+        filtrado = hist.copy()
+        if f_evento and "Mudança" in filtrado.columns:
+            filtrado = filtrado[filtrado["Mudança"] == f_evento]
+        if f_resp and "Responsável" in filtrado.columns:
+            filtrado = filtrado[filtrado["Responsável"] == f_resp]
+        if f_id and "ID" in filtrado.columns:
+            filtro_id = f_id.strip().upper()
+            filtrado = filtrado[filtrado["ID"].astype(str).str.upper().str.contains(filtro_id, na=False)]
+
+        # --- Ordenação por data e formatação robusta, cobrindo 2 formatos ---
+        if date_col is not None:
+            raw = filtrado[date_col].astype(str).str.strip()
+            # parse tolerante a "2025-10-21 00:00:00" e "21/10/2025"
+            dt = pd.to_datetime(raw, dayfirst=True, errors="coerce")
+
+            # Ordena usando coluna temporária
+            filtrado["_dt_tmp"] = dt
+            filtrado = filtrado.sort_values("_dt_tmp", ascending=False, na_position="last")
+
+            # Formata: onde parseou -> "dd/mm/YYYY HH:MM"; onde não parseou -> mantém texto original
+            fmt = dt.dt.strftime("%d/%m/%Y")
+            filtrado[date_col] = fmt.where(dt.notna(), raw)
+
+            # Remove coluna temporária
+            filtrado = filtrado.drop(columns=["_dt_tmp"])
+
+        # --- Exibir SOMENTE as colunas do preferred_cols, na ordem, usando o nome de data que existir ---
+        preferred_cols_base = ["Mudança", "ID", "Conteúdo da Caixa", "Responsável", "Observação"]
+        if date_col is not None:
+            preferred_cols = ["Mudança", date_col, "ID", "Conteúdo da Caixa", "Responsável", "Observação"]
+        else:
+            preferred_cols = preferred_cols_base  # sem coluna de data se não existir
+
+        cols_to_show = [c for c in preferred_cols if c in filtrado.columns]
+
+        st.dataframe(filtrado[cols_to_show] if cols_to_show else filtrado.iloc[0:0], use_container_width=True)
+
