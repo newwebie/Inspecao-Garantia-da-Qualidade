@@ -1192,7 +1192,11 @@ elif aba == "⚙️ Opções":
 
     if salvar and houve_alteracao:
         # Persiste apenas a aba "Selectboxes" no Excel, preservando as demais
-        update_sharepoint_file(file_name, edited_df, sheet_name="Selectboxes", keep_existing=True)
+        update_sharepoint_file(
+            file_name,
+            updates={"Selectboxes": edited_df},
+            keep_existing=True,
+        )
 
 
         try:
@@ -1224,7 +1228,11 @@ elif aba == "⚙️ Opções":
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar_reten and houve_alteracao_reten:
-        update_sharepoint_file(file_name, df_editado, sheet_name="Retenção", keep_existing=True)
+        update_sharepoint_file(
+            file_name,
+            updates={"Retenção": df_editado},
+            keep_existing=True,
+        )
 
         st.rerun()
     
@@ -1259,7 +1267,11 @@ elif aba == "⚙️ Opções":
         st.info("Foram detectadas alterações não salvas.")
 
     if salvar_espacos and houve_alteracao_espacos:
-        update_sharepoint_file(file_name, df_editado_espacos, sheet_name="Espaços", keep_existing=True)
+        update_sharepoint_file(
+            file_name,
+            updates={"Espaços": df_editado_espacos},
+            keep_existing=True,
+        )
 
         st.rerun()
 
